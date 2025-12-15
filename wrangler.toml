@@ -1,0 +1,17 @@
+name = "remix-starter-template"
+main = "./server.ts"
+compatibility_date = "2025-10-08"
+
+[assets]
+directory = "./build/client"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "forum_db"
+database_id = "8f8e4030-d303-4077-b3ae-f9d6567bb7a3"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true
+
+upload_source_maps = true

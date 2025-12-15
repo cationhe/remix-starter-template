@@ -2,6 +2,13 @@
 	"name": "remix-starter-template",
 	"compatibility_date": "2025-10-08",
 	"main": "./server.ts",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "forum_db",
+			"database_id": "8f8e4030-d303-4077-b3ae-f9d6567bb7a3"
+		}
+	],
 	"assets": {
 		"directory": "./build/client"
 	},

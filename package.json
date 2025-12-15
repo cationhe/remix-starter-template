@@ -38,7 +38,7 @@
 		"typescript": "5.8.3",
 		"vite": "5.4.14",
 		"vite-tsconfig-paths": "5.1.4",
-		"wrangler": "^3.114.4"
+		"wrangler": "^4.54.0"
 	},
 	"engines": {
 		"node": ">=20.0.0"
@@ -50,7 +50,7 @@
 		"check": "tsc && remix vite:build && wrangler deploy --dry-run",
 		"deploy": "wrangler deploy",
 		"dev": "remix vite:dev",
-		"lint": "eslint --ignore-path .gitignore --cache --cache-location ./node_modules/.cache/eslint .",
+		"lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
 		"preview": "npm run build && wrangler dev",
 		"start": "wrangler dev",
 		"typecheck": "tsc",
