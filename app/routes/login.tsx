@@ -1,0 +1,116 @@
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
+import { json, redirect } from "@remix-run/cloudflare";
+import { Form, useActionData, useNavigation } from "@remix-run/react";
+import { verifyLogin } from "~/lib/auth.server";
+import { commitSession, getSession } from "~/lib/session.server";
+
+type ActionData = {
+	fieldErrors?: {
+		email?: string;
+		password?: string;
+	};
+	formError?: string;
+};
+
+export async function loader({ request, context }: LoaderFunctionArgs) {
+	const session = await getSession(request, context);
+	const userId = session.get("userId");
+	if (userId) {
+		return redirect("/");
+	}
+	return json({});
+}
+
+export async function action({ request, context }: ActionFunctionArgs) {
+	const formData = await request.formData();
+	const email = String(formData.get("email") || "").trim();
+	const password = String(formData.get("password") || "");
+	const fieldErrors: ActionData["fieldErrors"] = {};
+	if (!email) {
+		fieldErrors.email = "请输入邮箱";
+	}
+	if (!password) {
+		fieldErrors.password = "请输入密码";
+	}
+	if (fieldErrors.email || fieldErrors.password) {
+		return json<ActionData>({ fieldErrors }, { status: 400 });
+	}
+	const user = await verifyLogin(context, email, password);
+	if (!user) {
+		return json<ActionData>(
+			{
+				formError: "邮箱或密码错误",
+			},
+			{ status: 400 },
+		);
+	}
+	const session = await getSession(request, context);
+	session.set("userId", user.id);
+	return redirect("/", {
+		headers: {
+			"Set-Cookie": await commitSession(session, context),
+		},
+	});
+}
+
+export default function Login() {
+	const actionData = useActionData<ActionData>();
+	const navigation = useNavigation();
+	const isSubmitting = navigation.state === "submitting";
+	return (
+		<div className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900">
+			<div className="w-full max-w-md rounded-xl bg-white p-8 shadow dark:bg-gray-800">
+				<h1 className="mb-6 text-center text-2xl font-semibold text-gray-900 dark:text-gray-100">
+					登录
+				</h1>
+				<Form method="post" className="space-y-5">
+					<div>
+						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+							邮箱
+						</label>
+						<input
+							name="email"
+							type="email"
+							required
+							className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+						/>
+						{actionData?.fieldErrors?.email ? (
+							<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.email}</p>
+						) : null}
+					</div>
+					<div>
+						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+							密码
+						</label>
+						<input
+							name="password"
+							type="password"
+							required
+							className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+						/>
+						{actionData?.fieldErrors?.password ? (
+							<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.password}</p>
+						) : null}
+					</div>
+					{actionData?.formError ? (
+						<p className="text-sm text-red-600">{actionData.formError}</p>
+					) : null}
+					<button
+						type="submit"
+						disabled={isSubmitting}
+						className="flex w-full items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+					>
+						{isSubmitting ? "登录中..." : "登录"}
+					</button>
+				</Form>
+				<p className="mt-4 text-center text-sm text-gray-600 dark:text-gray-300">
+					还没有账号？
+					<a href="/register" className="ml-1 text-blue-600 hover:underline">
+						去注册
+					</a>
+				</p>
+			</div>
+		</div>
+	);
+}
+

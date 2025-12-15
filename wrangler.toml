@@ -2,6 +2,9 @@ name = "remix-starter-template"
 main = "./server.ts"
 compatibility_date = "2025-10-08"
 
+[vars]
+SESSION_SECRET = "dev-only-session-secret-change-me"
+
 [assets]
 directory = "./build/client"
 

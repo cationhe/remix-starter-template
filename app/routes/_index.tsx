@@ -1,4 +1,8 @@
-import type { MetaFunction } from "@remix-run/cloudflare";
+import type { MetaFunction, LoaderFunctionArgs } from "@remix-run/cloudflare";
+import { json } from "@remix-run/cloudflare";
+import { useLoaderData } from "@remix-run/react";
+import { getSession } from "~/lib/session.server";
+import { findUserById } from "~/lib/auth.server";
 
 export const meta: MetaFunction = () => {
     return [
@@ -7,10 +11,21 @@ export const meta: MetaFunction = () => {
     ];
 };
 
+export async function loader({ request, context }: LoaderFunctionArgs) {
+    const session = await getSession(request, context);
+    const userId = session.get("userId") as number | undefined;
+    let user: Awaited<ReturnType<typeof findUserById>> = null;
+    if (userId) {
+        user = await findUserById(context, userId);
+    }
+    return json({ user });
+}
+
 export default function Index() {
-	return (
-		<div className="flex h-screen items-center justify-center">
-			<div className="flex flex-col items-center gap-16">
+    const data = useLoaderData<typeof loader>();
+    return (
+        <div className="flex h-screen items-center justify-center">
+            <div className="flex flex-col items-center gap-16">
                 <header className="flex flex-col items-center gap-9">
                     <h1 className="leading text-2xl font-bold text-gray-800 dark:text-gray-100">
                         欢迎使用 <span className="sr-only">Remix</span>
@@ -29,6 +44,26 @@ export default function Index() {
                     </div>
                 </header>
                 <nav className="flex flex-col items-center justify-center gap-4 rounded-3xl border border-gray-200 p-6 dark:border-gray-700">
+                    {data.user ? (
+                        <div className="flex items-center gap-3 text-gray-800 dark:text-gray-100">
+                            <span>已登录：{data.user.displayName}</span>
+                            <a
+                                href="/logout"
+                                className="rounded bg-gray-800 px-3 py-1 text-sm text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+                            >退出登录</a>
+                        </div>
+                    ) : (
+                        <div className="flex items-center gap-3">
+                            <a
+                                href="/login"
+                                className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-700"
+                            >登录</a>
+                            <a
+                                href="/register"
+                                className="rounded bg-green-600 px-3 py-1 text-sm text-white hover:bg-green-700"
+                            >注册</a>
+                        </div>
+                    )}
                     <p className="leading-6 text-gray-700 dark:text-gray-200">
                         接下来做什么？
                     </p>
