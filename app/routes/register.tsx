@@ -14,12 +14,7 @@ type ActionData = {
 	formError?: string;
 };
 
-export async function loader({ request, context }: LoaderFunctionArgs) {
-	const session = await getSession(request, context);
-	const userId = session.get("userId");
-	if (userId) {
-		return redirect("/");
-	}
+export async function loader({}: LoaderFunctionArgs) {
 	return json({});
 }
 
