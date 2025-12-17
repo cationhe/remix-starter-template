@@ -3,7 +3,7 @@ import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
-import { findUserById } from "~/lib/auth.server";
+import { assertNotBanned, findUserById, requireUser } from "~/lib/auth.server";
 
 type PostDetail = {
 	id: number;
@@ -121,11 +121,9 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 }
 
 export async function action({ request, context, params }: ActionFunctionArgs) {
-	const session = await getSession(request, context);
-	const userId = session.get("userId") as number | undefined;
-	if (!userId) {
-		return redirect("/login");
-	}
+	const user = await requireUser(request, context);
+	assertNotBanned(user);
+	const userId = user.id;
 	const rawId = params.id;
 	const postId = rawId ? Number(rawId) : NaN;
 	if (!rawId || Number.isNaN(postId)) {
@@ -217,6 +215,7 @@ export default function PostDetailPage() {
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
+	const isBanned = Boolean(data.user?.isBanned);
 	const commentStartIndex = (data.page - 1) * data.pageSize;
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
@@ -269,6 +268,11 @@ export default function PostDetailPage() {
 					</div>
 				</header>
 				<main className="flex flex-col gap-6">
+					{isBanned ? (
+						<div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+							账号已被封禁，无法删帖、点赞或发表评论。
+						</div>
+					) : null}
 					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<Link
@@ -279,31 +283,68 @@ export default function PostDetailPage() {
 							</Link>
 							<div className="flex items-center gap-2">
 								{data.user && data.user.id === data.post.authorId ? (
-									<Form method="post">
-										<input type="hidden" name="intent" value="delete" />
+									isBanned ? (
 										<button
-											type="submit"
-											className="rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700"
+											type="button"
+											disabled
+											className="cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-sm font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
 										>
 											删帖
 										</button>
-									</Form>
+									) : (
+										<Form method="post">
+											<input type="hidden" name="intent" value="delete" />
+											<button
+												type="submit"
+												className="rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700"
+											>
+												删帖
+											</button>
+										</Form>
+									)
 								) : null}
-								{data.user && data.user.id !== data.post.authorId ? (
-									<Form method="post">
-										<input type="hidden" name="intent" value="toggleLike" />
+								{data.user ? (
+									data.user.id !== data.post.authorId ? (
+										isBanned ? (
+											<button
+												type="button"
+												disabled
+												className="cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-sm font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+											>
+												点赞
+											</button>
+										) : (
+											<Form method="post">
+												<input type="hidden" name="intent" value="toggleLike" />
+												<button
+													type="submit"
+													className={
+														data.likedByMe
+															? "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+															: "rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
+													}
+												>
+													{data.likedByMe ? "已赞" : "点赞"}
+												</button>
+											</Form>
+										)
+									) : (
 										<button
-											type="submit"
-											className={
-												data.likedByMe
-													? "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
-													: "rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
-											}
+											type="button"
+											disabled
+											className="cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-sm font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
 										>
-											{data.likedByMe ? "已赞" : "点赞"}
+											点赞
 										</button>
-									</Form>
-								) : null}
+									)
+								) : (
+									<a
+										href="/login"
+										className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
+									>
+										登录后点赞
+									</a>
+								)}
 							</div>
 						</div>
 						{actionData?.formError ? (
@@ -380,6 +421,11 @@ export default function PostDetailPage() {
 							发表评论
 						</h2>
 						{data.user ? (
+							isBanned ? (
+								<p className="text-sm text-gray-600 dark:text-gray-300">
+									当前账号已被封禁，无法发表评论。
+								</p>
+							) : (
 							<Form method="post" className="space-y-4">
 								<input type="hidden" name="intent" value="comment" />
 								<div>
@@ -410,6 +456,7 @@ export default function PostDetailPage() {
 									</button>
 								</div>
 							</Form>
+							)
 						) : (
 							<p className="text-sm text-gray-600 dark:text-gray-300">
 								登录后可以发表评论。

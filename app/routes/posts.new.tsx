@@ -2,7 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
 import { getDBFromContext, execute } from "~/lib/d1.server";
-import { getSession } from "~/lib/session.server";
+import { assertNotBanned, requireUser } from "~/lib/auth.server";
 
 type ActionData = {
 	fieldErrors?: {
@@ -13,20 +13,14 @@ type ActionData = {
 };
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
-	const session = await getSession(request, context);
-	const userId = session.get("userId");
-	if (!userId) {
-		return redirect("/login");
-	}
+	const user = await requireUser(request, context);
+	assertNotBanned(user);
 	return json({});
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
-	const session = await getSession(request, context);
-	const userId = session.get("userId") as number | undefined;
-	if (!userId) {
-		return redirect("/login");
-	}
+	const user = await requireUser(request, context);
+	assertNotBanned(user);
 	const formData = await request.formData();
 	const title = String(formData.get("title") || "").trim();
 	const content = String(formData.get("content") || "").trim();
@@ -46,7 +40,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		await execute(
 			db,
 			"INSERT INTO posts (title, content, author_id, created_at) VALUES (?, ?, ?, ?)",
-			[title, content, userId, createdAt],
+			[title, content, user.id, createdAt],
 		);
 		return redirect("/posts");
 	} catch (error) {
@@ -115,4 +109,3 @@ export default function NewPost() {
 		</div>
 	);
 }
-

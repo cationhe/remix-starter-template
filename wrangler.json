@@ -3,7 +3,8 @@
 	"compatibility_date": "2025-10-08",
 	"main": "./server.ts",
 	"vars": {
-		"SESSION_SECRET": "dev-only-session-secret-change-me"
+		"SESSION_SECRET": "dev-only-session-secret-change-me",
+		"SUPERADMIN_EMAIL": ""
 	},
 	"d1_databases": [
 		{

@@ -34,6 +34,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
 export default function PostsIndex() {
 	const data = useLoaderData<typeof loader>();
+	const isBanned = Boolean(data.user?.isBanned);
+	const showAdmin = Boolean(
+		data.user && (data.user.role === "admin" || data.user.role === "superadmin"),
+	);
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
 			<div className="mx-auto flex max-w-3xl flex-col gap-6">
@@ -41,20 +45,28 @@ export default function PostsIndex() {
 					<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
 						帖子列表
 					</h1>
-					<div className="flex items-center gap-3 text-sm">
-						{data.user ? (
-							<>
-								<span className="text-gray-700 dark:text-gray-200">
-									已登录：{data.user.displayName}
-								</span>
-								<a
-									href="/logout"
-									className="rounded bg-gray-800 px-3 py-1 text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
-								>
-									退出登录
-								</a>
-							</>
-						) : (
+						<div className="flex items-center gap-3 text-sm">
+							{data.user ? (
+								<>
+									<span className="text-gray-700 dark:text-gray-200">
+										已登录：{data.user.displayName}
+									</span>
+									{showAdmin ? (
+										<a
+											href="/admin/users"
+											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+										>
+											用户管理
+										</a>
+									) : null}
+									<a
+										href="/logout"
+										className="rounded bg-gray-800 px-3 py-1 text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+									>
+										退出登录
+									</a>
+								</>
+							) : (
 							<>
 								<a
 									href="/login"
@@ -71,12 +83,17 @@ export default function PostsIndex() {
 							</>
 						)}
 					</div>
-				</header>
+					</header>
+				{isBanned ? (
+					<div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+						账号已被封禁，无法发帖。
+					</div>
+				) : null}
 				<div className="flex items-center justify-between">
 					<p className="text-sm text-gray-600 dark:text-gray-300">
 						在这里可以查看论坛中的帖子。
 					</p>
-					{data.user ? (
+					{data.user && !isBanned ? (
 						<Link
 							to="/posts/new"
 							className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
@@ -85,7 +102,7 @@ export default function PostsIndex() {
 						</Link>
 					) : (
 						<span className="text-xs text-gray-500 dark:text-gray-400">
-							登录后可以发帖
+							{data.user ? "封禁账号不可发帖" : "登录后可以发帖"}
 						</span>
 					)}
 				</div>
@@ -124,4 +141,3 @@ export default function PostsIndex() {
 		</div>
 	);
 }
-

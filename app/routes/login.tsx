@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
-import { verifyLogin } from "~/lib/auth.server";
+import { promoteToSuperadminIfMatch, verifyLogin } from "~/lib/auth.server";
 import { commitSession, getSession } from "~/lib/session.server";
 
 type ActionData = {
@@ -39,6 +39,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			{ status: 400 },
 		);
 	}
+	if (user.isBanned) {
+		return json<ActionData>({ formError: "账号已被封禁" }, { status: 403 });
+	}
+	await promoteToSuperadminIfMatch(context, user.id);
 	const session = await getSession(request, context);
 	session.set("userId", user.id);
 	return redirect("/", {

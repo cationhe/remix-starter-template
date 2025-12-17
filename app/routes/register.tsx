@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
-import { registerUser, findUserByEmail } from "~/lib/auth.server";
+import { findUserByEmail, promoteToSuperadminIfMatch, registerUser } from "~/lib/auth.server";
 import { commitSession, getSession } from "~/lib/session.server";
 
 type ActionData = {
@@ -59,6 +59,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	try {
 		const user = await registerUser(context, email, displayName, password);
+		await promoteToSuperadminIfMatch(context, user.id);
 		const session = await getSession(request, context);
 		session.set("userId", user.id);
 		return redirect("/", {
