@@ -2,6 +2,9 @@
 	"name": "remix-starter-template",
 	"compatibility_date": "2025-10-08",
 	"main": "./server.ts",
+	"vars": {
+		"SESSION_SECRET": "dev-only-session-secret-change-me"
+	},
 	"d1_databases": [
 		{
 			"binding": "DB",

@@ -7,10 +7,11 @@ function getEnv(context: AppLoadContext): Env {
 
 function getSessionStorage(context: AppLoadContext) {
 	const env = getEnv(context);
+	const secret = env.SESSION_SECRET || "dev-only-session-secret-change-me";
 	return createCookieSessionStorage({
 		cookie: {
 			name: "__forum_session",
-			secrets: [env.SESSION_SECRET],
+			secrets: [secret],
 			secure: true,
 			sameSite: "lax",
 			path: "/",
@@ -34,4 +35,3 @@ export async function destroySession(session: Session, context: AppLoadContext) 
 	const storage = getSessionStorage(context);
 	return storage.destroySession(session);
 }
-
