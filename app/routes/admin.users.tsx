@@ -117,9 +117,6 @@ export default function AdminUsersPage() {
 				<header className="flex items-center justify-between">
 					<div>
 						<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">用户管理</h1>
-						<p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-							当前登录：{data.me.displayName}（{data.me.role}）
-						</p>
 					</div>
 					<Link
 						to="/posts"

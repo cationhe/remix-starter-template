@@ -4,7 +4,7 @@
 	"main": "./server.ts",
 	"vars": {
 		"SESSION_SECRET": "dev-only-session-secret-change-me",
-		"SUPERADMIN_EMAIL": ""
+		"SUPERADMIN_EMAIL": "kationhe007@gmail.com"
 	},
 	"d1_databases": [
 		{

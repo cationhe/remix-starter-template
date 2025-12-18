@@ -236,36 +236,6 @@ export default function PostDetailPage() {
 							<span className="ml-3">点赞：{data.likeCount}</span>
 						</p>
 					</div>
-					<div className="flex items-center gap-3 text-sm">
-						{data.user ? (
-							<>
-								<span className="text-gray-700 dark:text-gray-200">
-									已登录：{data.user.displayName}
-								</span>
-								<a
-									href="/logout"
-									className="rounded bg-gray-800 px-3 py-1 text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
-								>
-									退出登录
-								</a>
-							</>
-						) : (
-							<>
-								<a
-									href="/login"
-									className="rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700"
-								>
-									登录
-								</a>
-								<a
-									href="/register"
-									className="rounded bg-green-600 px-3 py-1 text-white hover:bg-green-700"
-								>
-									注册
-								</a>
-							</>
-						)}
-					</div>
 				</header>
 				<main className="flex flex-col gap-6">
 					{isBanned ? (
