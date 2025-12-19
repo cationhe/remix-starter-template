@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, useActionData, useNavigation } from "@remix-run/react";
+import { Form, useActionData, useNavigation, useSearchParams } from "@remix-run/react";
 import {
 	consumeRateLimit,
 	getClientIp,
@@ -118,12 +118,19 @@ export default function Login() {
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
+	const [searchParams] = useSearchParams();
+	const resetSuccess = searchParams.get("reset") === "1";
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900">
 			<div className="w-full max-w-md rounded-xl bg-white p-8 shadow dark:bg-gray-800">
 				<h1 className="mb-6 text-center text-2xl font-semibold text-gray-900 dark:text-gray-100">
 					登录
 				</h1>
+				{resetSuccess ? (
+					<div className="mb-5 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200">
+						密码已重置，请使用新密码登录
+					</div>
+				) : null}
 				<Form method="post" className="space-y-5">
 					<div>
 						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
