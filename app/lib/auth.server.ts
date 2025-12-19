@@ -104,6 +104,10 @@ async function hashPassword(password: string, salt: string) {
 	return sha256(salt + ":" + password);
 }
 
+function normalizeEmail(email: string) {
+	return String(email || "").trim().toLowerCase();
+}
+
 export async function registerUser(
 	context: AppLoadContext,
 	email: string,
@@ -162,10 +166,11 @@ export async function verifyLogin(
 	password: string,
 ) {
 	const db = getDBFromContext(context);
+	const normalizedEmail = normalizeEmail(email);
 	const record = await queryOne<UserRecord>(
 		db,
-		"SELECT * FROM users WHERE email = ?",
-		[email],
+		"SELECT * FROM users WHERE lower(email) = ?",
+		[normalizedEmail],
 	);
 	if (!record) {
 		return null;
@@ -175,6 +180,45 @@ export async function verifyLogin(
 		return null;
 	}
 	return mapUser(record);
+}
+
+export async function changePassword(
+	context: AppLoadContext,
+	userId: number,
+	oldPassword: string,
+	newPassword: string,
+) {
+	const db = getDBFromContext(context);
+	const record = await queryOne<UserRecord>(db, "SELECT * FROM users WHERE id = ?", [userId]);
+	if (!record) {
+		throw new Error("USER_NOT_FOUND");
+	}
+	const expected = await hashPassword(oldPassword, record.password_salt);
+	if (expected !== record.password_hash) {
+		throw new Error("OLD_PASSWORD_INCORRECT");
+	}
+	const salt = fromRandomBytes(16);
+	const hash = await hashPassword(newPassword, salt);
+	await execute(db, "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?", [
+		hash,
+		salt,
+		userId,
+	]);
+}
+
+export async function setPasswordByUserId(context: AppLoadContext, userId: number, newPassword: string) {
+	const db = getDBFromContext(context);
+	const record = await queryOne<UserRecord>(db, "SELECT id as id FROM users WHERE id = ?", [userId]);
+	if (!record) {
+		throw new Error("USER_NOT_FOUND");
+	}
+	const salt = fromRandomBytes(16);
+	const hash = await hashPassword(newPassword, salt);
+	await execute(db, "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?", [
+		hash,
+		salt,
+		userId,
+	]);
 }
 
 export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId: number) {
@@ -199,4 +243,80 @@ export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId
 	} catch {
 		return;
 	}
+}
+
+type RateLimitConfig = {
+	windowMs: number;
+	max: number;
+	blockMs: number;
+};
+
+type RateLimitState = {
+	count: number;
+	windowStartedAt: number;
+	blockedUntil: number | null;
+};
+
+export function getClientIp(request: Request) {
+	const direct = request.headers.get("CF-Connecting-IP");
+	if (direct) {
+		const ip = direct.trim();
+		return ip ? ip : null;
+	}
+	const forwarded = request.headers.get("X-Forwarded-For");
+	if (forwarded) {
+		const first = forwarded.split(",")[0]?.trim() ?? "";
+		return first ? first : null;
+	}
+	return null;
+}
+
+export async function getRateLimitState(context: AppLoadContext, key: string, now = Date.now()) {
+	const db = getDBFromContext(context);
+	const record = await queryOne<RateLimitState>(
+		db,
+		"SELECT count as count, window_started_at as windowStartedAt, blocked_until as blockedUntil FROM auth_rate_limits WHERE key = ?",
+		[key],
+	);
+	if (!record) {
+		return { count: 0, windowStartedAt: now, blockedUntil: null };
+	}
+	return record;
+}
+
+export async function consumeRateLimit(context: AppLoadContext, key: string, config: RateLimitConfig, now = Date.now()) {
+	const db = getDBFromContext(context);
+	const state = await getRateLimitState(context, key, now);
+	if (state.blockedUntil && state.blockedUntil > now) {
+		return { allowed: false, blockedUntil: state.blockedUntil };
+	}
+
+	let windowStartedAt = state.windowStartedAt;
+	let count = state.count;
+	if (now - windowStartedAt >= config.windowMs) {
+		windowStartedAt = now;
+		count = 0;
+	}
+	count += 1;
+	const blockedUntil = count > config.max ? now + config.blockMs : null;
+
+	await execute(
+		db,
+		"INSERT INTO auth_rate_limits (key, count, window_started_at, blocked_until, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET count = excluded.count, window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at",
+		[key, count, windowStartedAt, blockedUntil, now],
+	);
+
+	if (blockedUntil && blockedUntil > now) {
+		return { allowed: false, blockedUntil };
+	}
+	return { allowed: true, blockedUntil: null };
+}
+
+export async function resetRateLimit(context: AppLoadContext, key: string, now = Date.now()) {
+	const db = getDBFromContext(context);
+	await execute(
+		db,
+		"INSERT INTO auth_rate_limits (key, count, window_started_at, blocked_until, updated_at) VALUES (?, 0, ?, NULL, ?) ON CONFLICT(key) DO UPDATE SET count = 0, window_started_at = excluded.window_started_at, blocked_until = NULL, updated_at = excluded.updated_at",
+		[key, now, now],
+	);
 }

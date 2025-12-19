@@ -1,0 +1,166 @@
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
+import { json } from "@remix-run/cloudflare";
+import { Form, Link, useActionData, useNavigation } from "@remix-run/react";
+import { findUserByEmail } from "~/lib/auth.server";
+import { execute, getDBFromContext } from "~/lib/d1.server";
+
+type ActionData = {
+	fieldErrors?: {
+		email?: string;
+	};
+	formError?: string;
+	ok?: boolean;
+};
+
+function getEnv(context: unknown): Env {
+	return (context as any).cloudflare.env as Env;
+}
+
+function toHex(data: Uint8Array) {
+	return Array.from(data)
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+function randomTokenHex(size: number) {
+	const bytes = new Uint8Array(size);
+	crypto.getRandomValues(bytes);
+	return toHex(bytes);
+}
+
+async function sha256(input: string) {
+	const encoder = new TextEncoder();
+	const data = encoder.encode(input);
+	const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+	return toHex(new Uint8Array(hashBuffer));
+}
+
+async function sendResetEmail(args: {
+	apiKey: string;
+	from: string;
+	to: string;
+	resetUrl: string;
+}) {
+	const resp = await fetch("https://api.resend.com/emails", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${args.apiKey}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			from: args.from,
+			to: args.to,
+			subject: "重置密码",
+			text: `你正在重置论坛账号密码。请在 60 分钟内打开链接并设置新密码：\n\n${args.resetUrl}\n\n如果不是你本人操作，请忽略这封邮件。`,
+		}),
+	});
+	if (!resp.ok) {
+		throw new Error("EMAIL_SEND_FAILED");
+	}
+}
+
+export async function loader({}: LoaderFunctionArgs) {
+	return json({});
+}
+
+export async function action({ request, context }: ActionFunctionArgs) {
+	const formData = await request.formData();
+	const email = String(formData.get("email") || "").trim();
+
+	const fieldErrors: ActionData["fieldErrors"] = {};
+	if (!email) {
+		fieldErrors.email = "请输入邮箱";
+	}
+	if (fieldErrors.email) {
+		return json<ActionData>({ fieldErrors }, { status: 400 });
+	}
+
+	const user = await findUserByEmail(context, email);
+	if (user) {
+		const env = getEnv(context);
+		const baseUrl = String((env as any).PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+		const from = String((env as any).EMAIL_FROM || "").trim();
+		const apiKey = String((env as any).RESEND_API_KEY || "").trim();
+		if (!baseUrl || !from || !apiKey) {
+			return json<ActionData>({ formError: "邮件服务未配置" }, { status: 500 });
+		}
+		const token = randomTokenHex(32);
+		const tokenHash = await sha256(`reset:${token}`);
+		const now = Date.now();
+		const expiresAt = now + 60 * 60 * 1000;
+		const ip = request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || null;
+
+		const db = getDBFromContext(context);
+		await execute(
+			db,
+			"INSERT INTO password_resets (user_id, token_hash, expires_at, used_at, created_at, requested_ip) VALUES (?, ?, ?, NULL, ?, ?)",
+			[user.id, tokenHash, expiresAt, now, ip],
+		);
+
+		const resetUrl = `${baseUrl}/reset-password?token=${encodeURIComponent(token)}`;
+		await sendResetEmail({ apiKey, from, to: user.email, resetUrl });
+	}
+
+	return json<ActionData>({ ok: true });
+}
+
+export default function ForgotPasswordPage() {
+	const actionData = useActionData<ActionData>();
+	const navigation = useNavigation();
+	const isSubmitting = navigation.state === "submitting";
+
+	return (
+		<div className="flex min-h-screen items-center justify-center bg-gray-50 px-4 dark:bg-gray-900">
+			<div className="w-full max-w-md rounded-xl bg-white p-8 shadow dark:bg-gray-800">
+				<h1 className="mb-2 text-center text-2xl font-semibold text-gray-900 dark:text-gray-100">
+					忘记密码
+				</h1>
+				<p className="mb-6 text-center text-sm text-gray-600 dark:text-gray-300">
+					输入邮箱后，如果账号存在，将发送重置链接。
+				</p>
+
+				{actionData?.ok ? (
+					<div className="mb-5 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200">
+						如果邮箱存在，将收到重置邮件。
+					</div>
+				) : null}
+				{actionData?.formError ? (
+					<div className="mb-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+						{actionData.formError}
+					</div>
+				) : null}
+
+				<Form method="post" className="space-y-5">
+					<div>
+						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+							邮箱
+						</label>
+						<input
+							name="email"
+							type="email"
+							required
+							className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+						/>
+						{actionData?.fieldErrors?.email ? (
+							<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.email}</p>
+						) : null}
+					</div>
+					<button
+						type="submit"
+						disabled={isSubmitting}
+						className="flex w-full items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+					>
+						{isSubmitting ? "发送中..." : "发送重置邮件"}
+					</button>
+				</Form>
+
+				<div className="mt-5 text-center text-sm">
+					<Link to="/login" className="text-blue-600 hover:underline">
+						返回登录
+					</Link>
+				</div>
+			</div>
+		</div>
+	);
+}
+

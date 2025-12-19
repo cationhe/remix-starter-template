@@ -1,7 +1,14 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
-import { promoteToSuperadminIfMatch, verifyLogin } from "~/lib/auth.server";
+import {
+	consumeRateLimit,
+	getClientIp,
+	getRateLimitState,
+	promoteToSuperadminIfMatch,
+	resetRateLimit,
+	verifyLogin,
+} from "~/lib/auth.server";
 import { commitSession, getSession } from "~/lib/session.server";
 
 type ActionData = {
@@ -20,6 +27,34 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const formData = await request.formData();
 	const email = String(formData.get("email") || "").trim();
 	const password = String(formData.get("password") || "");
+	const ip = getClientIp(request);
+	const normalizedEmail = email.trim().toLowerCase();
+	const now = Date.now();
+
+	const loginIpConfig = { windowMs: 15 * 60 * 1000, max: 20, blockMs: 15 * 60 * 1000 };
+	const loginEmailConfig = { windowMs: 15 * 60 * 1000, max: 8, blockMs: 15 * 60 * 1000 };
+
+	if (ip) {
+		const state = await getRateLimitState(context, `login:ip:${ip}`, now);
+		if (state.blockedUntil && state.blockedUntil > now) {
+			const retryAfterSeconds = Math.max(1, Math.ceil((state.blockedUntil - now) / 1000));
+			return json<ActionData>(
+				{ formError: `尝试过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
+				{ status: 429 },
+			);
+		}
+	}
+	if (normalizedEmail) {
+		const state = await getRateLimitState(context, `login:email:${normalizedEmail}`, now);
+		if (state.blockedUntil && state.blockedUntil > now) {
+			const retryAfterSeconds = Math.max(1, Math.ceil((state.blockedUntil - now) / 1000));
+			return json<ActionData>(
+				{ formError: `尝试过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
+				{ status: 429 },
+			);
+		}
+	}
+
 	const fieldErrors: ActionData["fieldErrors"] = {};
 	if (!email) {
 		fieldErrors.email = "请输入邮箱";
@@ -32,12 +67,39 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 	const user = await verifyLogin(context, email, password);
 	if (!user) {
+		let blockedUntil: number | null = null;
+		if (ip) {
+			const result = await consumeRateLimit(context, `login:ip:${ip}`, loginIpConfig, now);
+			blockedUntil = result.allowed ? blockedUntil : result.blockedUntil;
+		}
+		if (normalizedEmail) {
+			const result = await consumeRateLimit(
+				context,
+				`login:email:${normalizedEmail}`,
+				loginEmailConfig,
+				now,
+			);
+			blockedUntil = result.allowed ? blockedUntil : result.blockedUntil;
+		}
+		if (blockedUntil && blockedUntil > now) {
+			const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - now) / 1000));
+			return json<ActionData>(
+				{ formError: `尝试过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
+				{ status: 429 },
+			);
+		}
 		return json<ActionData>(
 			{
 				formError: "邮箱或密码错误",
 			},
 			{ status: 400 },
 		);
+	}
+	if (ip) {
+		await resetRateLimit(context, `login:ip:${ip}`, now);
+	}
+	if (normalizedEmail) {
+		await resetRateLimit(context, `login:email:${normalizedEmail}`, now);
 	}
 	if (user.isBanned) {
 		return json<ActionData>({ formError: "账号已被封禁" }, { status: 403 });
@@ -102,12 +164,14 @@ export default function Login() {
 						{isSubmitting ? "登录中..." : "登录"}
 					</button>
 				</Form>
-				<p className="mt-4 text-center text-sm text-gray-600 dark:text-gray-300">
-					还没有账号？
-					<a href="/register" className="ml-1 text-blue-600 hover:underline">
+				<div className="mt-4 flex items-center justify-between text-sm">
+					<a href="/forgot-password" className="text-blue-600 hover:underline">
+						忘记密码？
+					</a>
+					<a href="/register" className="text-blue-600 hover:underline">
 						去注册
 					</a>
-				</p>
+				</div>
 			</div>
 		</div>
 	);

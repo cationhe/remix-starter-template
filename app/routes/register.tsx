@@ -1,7 +1,13 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useNavigation } from "@remix-run/react";
-import { findUserByEmail, promoteToSuperadminIfMatch, registerUser } from "~/lib/auth.server";
+import {
+	consumeRateLimit,
+	findUserByEmail,
+	getClientIp,
+	promoteToSuperadminIfMatch,
+	registerUser,
+} from "~/lib/auth.server";
 import { commitSession, getSession } from "~/lib/session.server";
 
 type ActionData = {
@@ -24,6 +30,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const displayName = String(formData.get("displayName") || "").trim();
 	const password = String(formData.get("password") || "");
 	const confirmPassword = String(formData.get("confirmPassword") || "");
+	const ip = getClientIp(request);
+	const normalizedEmail = email.trim().toLowerCase();
+	const now = Date.now();
 
 	const fieldErrors: ActionData["fieldErrors"] = {};
 	if (!email) {
@@ -43,6 +52,34 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 	if (fieldErrors.email || fieldErrors.displayName || fieldErrors.password || fieldErrors.confirmPassword) {
 		return json<ActionData>({ fieldErrors }, { status: 400 });
+	}
+
+	const registerIpConfig = { windowMs: 60 * 60 * 1000, max: 5, blockMs: 60 * 60 * 1000 };
+	const registerEmailConfig = { windowMs: 60 * 60 * 1000, max: 3, blockMs: 60 * 60 * 1000 };
+	if (ip) {
+		const result = await consumeRateLimit(context, `register:ip:${ip}`, registerIpConfig, now);
+		if (!result.allowed && result.blockedUntil && result.blockedUntil > now) {
+			const retryAfterSeconds = Math.max(1, Math.ceil((result.blockedUntil - now) / 1000));
+			return json<ActionData>(
+				{ formError: `注册过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
+				{ status: 429 },
+			);
+		}
+	}
+	if (normalizedEmail) {
+		const result = await consumeRateLimit(
+			context,
+			`register:email:${normalizedEmail}`,
+			registerEmailConfig,
+			now,
+		);
+		if (!result.allowed && result.blockedUntil && result.blockedUntil > now) {
+			const retryAfterSeconds = Math.max(1, Math.ceil((result.blockedUntil - now) / 1000));
+			return json<ActionData>(
+				{ formError: `注册过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
+				{ status: 429 },
+			);
+		}
 	}
 
 	const existing = await findUserByEmail(context, email);

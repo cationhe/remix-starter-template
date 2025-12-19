@@ -96,6 +96,14 @@ export default function MePage() {
 
 				<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 					<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">账号信息</h2>
+					<div className="mt-4 flex flex-wrap items-center gap-2">
+						<Link
+							to="/me/password"
+							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+						>
+							修改密码
+						</Link>
+					</div>
 					<dl className="mt-4 grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
 						<div>
 							<dt className="text-gray-500 dark:text-gray-400">邮箱</dt>
@@ -121,4 +129,3 @@ export default function MePage() {
 		</div>
 	);
 }
-
