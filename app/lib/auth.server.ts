@@ -139,7 +139,7 @@ async function resendSendEmail(context: AppLoadContext, args: { to: string; subj
 		} catch {
 			bodyText = "";
 		}
-		console.error("resend_send_failed", { status: resp.status, bodyText });
+		console.error(`resend_send_failed ${JSON.stringify({ status: resp.status, bodyText })}`);
 		if (resp.status === 401 || resp.status === 403) {
 			throw new Error("RESEND_API_KEY_INVALID");
 		}
@@ -190,7 +190,10 @@ async function mailchannelsSendEmail(
 		} catch {
 			bodyText = "";
 		}
-		console.error("mailchannels_send_failed", { status: resp.status, bodyText });
+		console.error(`mailchannels_send_failed ${JSON.stringify({ status: resp.status, bodyText })}`);
+		if (resp.status === 401) {
+			throw new Error("MAILCHANNELS_NOT_AUTHORIZED");
+		}
 		throw new Error("EMAIL_SEND_FAILED");
 	}
 }

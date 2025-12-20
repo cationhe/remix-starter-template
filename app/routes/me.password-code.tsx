@@ -48,6 +48,12 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				{ status: 500 },
 			);
 		}
+		if (message === "MAILCHANNELS_NOT_AUTHORIZED") {
+			return json<ActionData>(
+				{ ok: false, message: "MailChannels 未授权：请为发件域名配置 Domain Lockdown DNS TXT 记录" },
+				{ status: 500 },
+			);
+		}
 		if (message === "EMAIL_SEND_FAILED_ALL_PROVIDERS") {
 			return json<ActionData>({ ok: false, message: "邮件发送失败（所有通道均失败）" }, { status: 500 });
 		}
