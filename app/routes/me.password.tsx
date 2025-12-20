@@ -1,7 +1,12 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams } from "@remix-run/react";
-import { changePassword, requireUser } from "~/lib/auth.server";
+import {
+	assertPasswordChangeVerified,
+	changePassword,
+	clearPasswordChangeVerified,
+	requireUser,
+} from "~/lib/auth.server";
 
 type ActionData = {
 	fieldErrors?: {
@@ -17,8 +22,8 @@ type LoaderData = {
 };
 
 function validatePasswordStrength(password: string) {
-	if (password.length < 8) {
-		return "密码长度至少为 8 位";
+	if (password.length < 6) {
+		return "密码长度至少为 6 位";
 	}
 	if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
 		return "密码需要同时包含字母和数字";
@@ -28,11 +33,19 @@ function validatePasswordStrength(password: string) {
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
+	const verified = await assertPasswordChangeVerified(context, me.id);
+	if (!verified) {
+		throw redirect("/me?pwdVerify=1");
+	}
 	return json<LoaderData>({ me });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
+	const verified = await assertPasswordChangeVerified(context, me.id);
+	if (!verified) {
+		return redirect("/me?pwdVerify=1");
+	}
 	const formData = await request.formData();
 	const oldPassword = String(formData.get("oldPassword") || "");
 	const newPassword = String(formData.get("newPassword") || "");
@@ -61,6 +74,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	try {
 		await changePassword(context, me.id, oldPassword, newPassword);
+		await clearPasswordChangeVerified(context, me.id);
 		return redirect("/me/password?success=1");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
@@ -139,7 +153,7 @@ export default function ChangePasswordPage() {
 								<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.newPassword}</p>
 							) : (
 								<p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-									至少 8 位，且同时包含字母和数字
+									至少 6 位，且同时包含字母和数字
 								</p>
 							)}
 						</div>

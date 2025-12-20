@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, useLoaderData, useNavigate } from "@remix-run/react";
-import { useState } from "react";
+import { Link, useFetcher, useLoaderData, useNavigate, useSearchParams } from "@remix-run/react";
+import { useEffect, useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
 
@@ -50,6 +50,98 @@ export default function MePage() {
 	const isBanned = Boolean(me.isBanned);
 	const navigate = useNavigate();
 	const [navError, setNavError] = useState<string | null>(null);
+	const [searchParams, setSearchParams] = useSearchParams();
+
+	const sendFetcher = useFetcher<any>();
+	const verifyFetcher = useFetcher<any>();
+	const [showPwdModal, setShowPwdModal] = useState(false);
+	const [code, setCode] = useState("");
+	const [cooldown, setCooldown] = useState(0);
+	const [pwdMessage, setPwdMessage] = useState<string | null>(null);
+
+	function maskEmail(email: string) {
+		const [local, domain] = email.split("@");
+		if (!local || !domain) {
+			return email;
+		}
+		const prefix = local.slice(0, Math.min(2, local.length));
+		return `${prefix}***@${domain}`;
+	}
+
+	function openPwdModal(reason?: string) {
+		setShowPwdModal(true);
+		setPwdMessage(reason ?? null);
+		setCode("");
+		try {
+			sendFetcher.submit({ intent: "send" }, { method: "post", action: "/me/password-code" });
+		} catch {
+			setPwdMessage("发起验证码失败，请刷新页面后重试");
+		}
+	}
+
+	function closePwdModal() {
+		setShowPwdModal(false);
+		setCode("");
+		setPwdMessage(null);
+		setCooldown(0);
+	}
+
+	useEffect(() => {
+		const needVerify = searchParams.get("pwdVerify") === "1";
+		if (!needVerify) {
+			return;
+		}
+		openPwdModal("请先完成邮箱验证码验证");
+		const next = new URLSearchParams(searchParams);
+		next.delete("pwdVerify");
+		setSearchParams(next, { replace: true });
+	}, [searchParams, setSearchParams]);
+
+	useEffect(() => {
+		const data = sendFetcher.data;
+		if (!data) {
+			return;
+		}
+		if (data.ok && data.intent === "send") {
+			setPwdMessage("验证码已发送，请查收邮箱");
+			setCooldown(60);
+			return;
+		}
+		if (data.ok === false && data.message) {
+			setPwdMessage(String(data.message));
+		}
+	}, [sendFetcher.data]);
+
+	useEffect(() => {
+		const data = verifyFetcher.data;
+		if (!data) {
+			return;
+		}
+		if (data.ok && data.intent === "verify") {
+			closePwdModal();
+			try {
+				navigate("/me/password");
+			} catch {
+				window.location.href = "/me/password";
+			}
+			return;
+		}
+		if (data.ok === false && data.message) {
+			setPwdMessage(String(data.message));
+		}
+	}, [verifyFetcher.data, navigate]);
+
+	useEffect(() => {
+		if (!showPwdModal || cooldown <= 0) {
+			return;
+		}
+		const timer = window.setInterval(() => {
+			setCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+		}, 1000);
+		return () => {
+			window.clearInterval(timer);
+		};
+	}, [showPwdModal, cooldown]);
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -105,22 +197,16 @@ export default function MePage() {
 						</div>
 					) : null}
 					<div className="mt-4 flex flex-wrap items-center gap-2">
-						<Link
-							to="/me/password"
-							onClick={(event) => {
-								event.preventDefault();
+						<button
+							type="button"
+							onClick={() => {
 								setNavError(null);
-								try {
-									navigate("/me/password");
-								} catch {
-									setNavError("跳转失败，请刷新页面后重试");
-									window.location.href = "/me/password";
-								}
+								openPwdModal();
 							}}
 							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 						>
 							修改密码
-						</Link>
+						</button>
 					</div>
 					<dl className="mt-4 grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
 						<div>
@@ -144,6 +230,78 @@ export default function MePage() {
 					</dl>
 				</section>
 			</div>
+			{showPwdModal ? (
+				<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+					<div className="w-full max-w-md rounded-xl bg-white p-6 shadow-lg dark:bg-gray-800">
+						<h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">邮箱验证码验证</h3>
+						<p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+							验证码将发送至：{maskEmail(me.email)}
+						</p>
+
+						{pwdMessage ? (
+							<div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-200">
+								{pwdMessage}
+							</div>
+						) : null}
+
+						<div className="mt-4">
+							<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+								验证码
+							</label>
+							<input
+								value={code}
+								onChange={(e) => {
+									const raw = e.target.value;
+									const next = raw.replace(/\D/g, "").slice(0, 6);
+									setCode(next);
+								}}
+								inputMode="numeric"
+								autoComplete="one-time-code"
+								placeholder="请输入 6 位数字"
+								className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+							/>
+							<div className="mt-3 flex items-center justify-between gap-3">
+								<button
+									type="button"
+									disabled={cooldown > 0 || sendFetcher.state !== "idle"}
+									onClick={() => {
+										setPwdMessage(null);
+										sendFetcher.submit({ intent: "send" }, { method: "post", action: "/me/password-code" });
+									}}
+									className="text-sm text-blue-600 hover:underline disabled:text-gray-400 disabled:no-underline"
+								>
+									{cooldown > 0 ? `重新发送（${cooldown}s）` : "重新发送"}
+								</button>
+								<span className="text-xs text-gray-500 dark:text-gray-400">有效期 15 分钟</span>
+							</div>
+						</div>
+
+						<div className="mt-6 flex items-center justify-end gap-3">
+							<button
+								type="button"
+								onClick={closePwdModal}
+								className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+							>
+								取消
+							</button>
+							<button
+								type="button"
+								disabled={code.length !== 6 || verifyFetcher.state !== "idle"}
+								onClick={() => {
+									setPwdMessage(null);
+									verifyFetcher.submit(
+										{ intent: "verify", code },
+										{ method: "post", action: "/me/password-code" },
+									);
+								}}
+								className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+							>
+								确认
+							</button>
+						</div>
+					</div>
+				</div>
+			) : null}
 		</div>
 	);
 }

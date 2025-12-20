@@ -100,6 +100,340 @@ async function sha256(input: string) {
 	return toHex(new Uint8Array(hashBuffer));
 }
 
+function getEnvString(context: AppLoadContext, key: string) {
+	const env = getEnv(context) as any;
+	return String(env?.[key] ?? "").trim();
+}
+
+function normalizeUrl(base: string) {
+	return base.replace(/\/$/, "");
+}
+
+async function resendSendEmail(context: AppLoadContext, args: { to: string; subject: string; text: string }) {
+	const apiKey = getEnvString(context, "RESEND_API_KEY");
+	const from = getEnvString(context, "EMAIL_FROM");
+	if (!apiKey || !from) {
+		throw new Error("EMAIL_NOT_CONFIGURED");
+	}
+	const resp = await fetch("https://api.resend.com/emails", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${apiKey}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			from,
+			to: args.to,
+			subject: args.subject,
+			text: args.text,
+		}),
+	});
+	if (!resp.ok) {
+		throw new Error("EMAIL_SEND_FAILED");
+	}
+}
+
+type AuditEventType =
+	| "pwd_code_send"
+	| "pwd_code_send_failed"
+	| "pwd_code_verify_ok"
+	| "pwd_code_verify_failed"
+	| "pwd_code_rate_limited"
+	| "pwd_code_locked";
+
+async function recordSecurityAuditEvent(args: {
+	context: AppLoadContext;
+	userId: number;
+	eventType: AuditEventType;
+	ip: string | null;
+	userAgent: string | null;
+	metadata?: Record<string, unknown>;
+}) {
+	try {
+		const db = getDBFromContext(args.context);
+		const createdAt = Date.now();
+		await execute(
+			db,
+			"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			[
+				args.userId,
+				args.eventType,
+				args.ip,
+				args.userAgent,
+				JSON.stringify(args.metadata ?? {}),
+				createdAt,
+			],
+		);
+	} catch {
+		return;
+	}
+}
+
+type UpstashResult<T> = { result?: T; error?: string };
+
+function getUpstashConfig(context: AppLoadContext) {
+	const url = getEnvString(context, "UPSTASH_REDIS_REST_URL");
+	const token = getEnvString(context, "UPSTASH_REDIS_REST_TOKEN");
+	if (!url || !token) {
+		return null;
+	}
+	return { url: normalizeUrl(url), token };
+}
+
+async function upstashPipeline(context: AppLoadContext, commands: unknown[][]) {
+	const cfg = getUpstashConfig(context);
+	if (!cfg) {
+		throw new Error("REDIS_NOT_CONFIGURED");
+	}
+	const resp = await fetch(`${cfg.url}/pipeline`, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${cfg.token}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(commands),
+	});
+	if (!resp.ok) {
+		throw new Error("REDIS_REQUEST_FAILED");
+	}
+	const data = (await resp.json()) as UpstashResult<unknown>[];
+	if (!Array.isArray(data)) {
+		throw new Error("REDIS_RESPONSE_INVALID");
+	}
+	return data;
+}
+
+async function redisGet(context: AppLoadContext, key: string) {
+	const [res] = await upstashPipeline(context, [["GET", key]]);
+	if (res?.error) {
+		throw new Error("REDIS_GET_FAILED");
+	}
+	return (res?.result as string | null | undefined) ?? null;
+}
+
+async function redisDel(context: AppLoadContext, key: string) {
+	const [res] = await upstashPipeline(context, [["DEL", key]]);
+	if (res?.error) {
+		throw new Error("REDIS_DEL_FAILED");
+	}
+}
+
+async function redisSetEx(context: AppLoadContext, key: string, value: string, ttlSeconds: number) {
+	const [res] = await upstashPipeline(context, [["SET", key, value, "EX", ttlSeconds]]);
+	if (res?.error) {
+		throw new Error("REDIS_SET_FAILED");
+	}
+}
+
+async function redisIncrWithExpire(context: AppLoadContext, key: string, ttlSeconds: number) {
+	const results = await upstashPipeline(context, [["INCR", key], ["TTL", key]]);
+	const incr = results[0];
+	const ttl = results[1];
+	if (incr?.error || ttl?.error) {
+		throw new Error("REDIS_INCR_FAILED");
+	}
+	const count = Number(incr?.result ?? 0);
+	const ttlValue = Number(ttl?.result ?? -2);
+	if (ttlValue < 0) {
+		await upstashPipeline(context, [["EXPIRE", key, ttlSeconds]]);
+	}
+	return count;
+}
+
+function generateSixDigitCode() {
+	const bytes = new Uint8Array(4);
+	crypto.getRandomValues(bytes);
+	const value = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+	const code = value % 1_000_000;
+	return code.toString().padStart(6, "0");
+}
+
+async function hashPasswordCode(context: AppLoadContext, userId: number, code: string) {
+	const secret = getEnvString(context, "SESSION_SECRET");
+	return sha256(`pwd_code:${userId}:${code}:${secret}`);
+}
+
+export async function sendPasswordChangeCode(args: {
+	request: Request;
+	context: AppLoadContext;
+	user: AuthUser;
+}) {
+	const codeKey = `user:${args.user.id}:pwd_code`;
+	const lockKey = `user:${args.user.id}:pwd_code_locked`;
+	const sendKey = `user:${args.user.id}:pwd_code_send_cd`;
+	const wrongKey = `user:${args.user.id}:pwd_code_wrong`;
+	const now = Date.now();
+	const ip = getClientIp(args.request);
+	const userAgent = args.request.headers.get("User-Agent");
+
+	const locked = await redisGet(args.context, lockKey);
+	if (locked) {
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_locked",
+			ip,
+			userAgent,
+		});
+		throw new Response("功能已锁定，请稍后再试", { status: 429 });
+	}
+
+	const cooldown = await redisGet(args.context, sendKey);
+	if (cooldown) {
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_rate_limited",
+			ip,
+			userAgent,
+			metadata: { scope: "send" },
+		});
+		throw new Response("发送过于频繁，请稍后再试", { status: 429 });
+	}
+
+	const code = generateSixDigitCode();
+	const hashed = await hashPasswordCode(args.context, args.user.id, code);
+	await redisSetEx(args.context, codeKey, hashed, 15 * 60);
+	await redisDel(args.context, wrongKey);
+
+	const text =
+		`你正在进行“修改密码”操作。\n\n` +
+		`验证码：${code}\n` +
+		`有效期：15 分钟\n\n` +
+		`安全提示：请勿将验证码告知他人；如非本人操作，请尽快登录并修改密码。\n` +
+		`操作时间：${new Date(now).toLocaleString()}`;
+
+	try {
+		await resendSendEmail(args.context, {
+			to: args.user.email,
+			subject: "修改密码验证码",
+			text,
+		});
+		await redisSetEx(args.context, sendKey, "1", 60);
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_send",
+			ip,
+			userAgent,
+		});
+		return { ok: true } as const;
+	} catch (error) {
+		await redisDel(args.context, codeKey);
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_send_failed",
+			ip,
+			userAgent,
+			metadata: { message: error instanceof Error ? error.message : "" },
+		});
+		throw error;
+	}
+}
+
+export async function verifyPasswordChangeCode(args: {
+	request: Request;
+	context: AppLoadContext;
+	user: AuthUser;
+	code: string;
+}) {
+	const codeKey = `user:${args.user.id}:pwd_code`;
+	const lockKey = `user:${args.user.id}:pwd_code_locked`;
+	const wrongKey = `user:${args.user.id}:pwd_code_wrong`;
+	const verifiedKey = `user:${args.user.id}:pwd_verified`;
+	const ip = getClientIp(args.request);
+	const userAgent = args.request.headers.get("User-Agent");
+
+	const locked = await redisGet(args.context, lockKey);
+	if (locked) {
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_locked",
+			ip,
+			userAgent,
+		});
+		throw new Response("功能已锁定，请 5 分钟后再试", { status: 429 });
+	}
+
+	const bucket = Math.floor(Date.now() / 60_000);
+	const attemptsKey = `user:${args.user.id}:pwd_code_attempts:${bucket}`;
+	const attempts = await redisIncrWithExpire(args.context, attemptsKey, 60);
+	if (attempts > 3) {
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_rate_limited",
+			ip,
+			userAgent,
+			metadata: { scope: "verify" },
+		});
+		throw new Response("请求过于频繁，请稍后再试", { status: 429 });
+	}
+
+	const storedHash = await redisGet(args.context, codeKey);
+	if (!storedHash) {
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_verify_failed",
+			ip,
+			userAgent,
+			metadata: { reason: "expired" },
+		});
+		throw new Response("验证码已过期，请重新发送", { status: 400 });
+	}
+
+	const incoming = await hashPasswordCode(args.context, args.user.id, args.code);
+	if (incoming !== storedHash) {
+		const wrongCount = await redisIncrWithExpire(args.context, wrongKey, 5 * 60);
+		await recordSecurityAuditEvent({
+			context: args.context,
+			userId: args.user.id,
+			eventType: "pwd_code_verify_failed",
+			ip,
+			userAgent,
+			metadata: { reason: "mismatch", wrongCount },
+		});
+		if (wrongCount >= 3) {
+			await redisSetEx(args.context, lockKey, "1", 5 * 60);
+			await redisDel(args.context, codeKey);
+			throw new Response("验证码错误次数过多，功能已锁定 5 分钟", { status: 429 });
+		}
+		throw new Response("验证码错误", { status: 400 });
+	}
+
+	await redisSetEx(args.context, verifiedKey, "1", 15 * 60);
+	await redisDel(args.context, codeKey);
+	await redisDel(args.context, wrongKey);
+	await recordSecurityAuditEvent({
+		context: args.context,
+		userId: args.user.id,
+		eventType: "pwd_code_verify_ok",
+		ip,
+		userAgent,
+	});
+	return { ok: true } as const;
+}
+
+export async function assertPasswordChangeVerified(context: AppLoadContext, userId: number) {
+	try {
+		const verified = await redisGet(context, `user:${userId}:pwd_verified`);
+		return Boolean(verified);
+	} catch {
+		return false;
+	}
+}
+
+export async function clearPasswordChangeVerified(context: AppLoadContext, userId: number) {
+	try {
+		await redisDel(context, `user:${userId}:pwd_verified`);
+	} catch {
+		return;
+	}
+}
+
 async function hashPassword(password: string, salt: string) {
 	return sha256(salt + ":" + password);
 }
