@@ -13,6 +13,8 @@ type UserRecord = {
 	role?: string;
 	is_banned?: number;
 	banned_at?: number | null;
+	must_change_password?: number;
+	temp_password_expires_at?: number | null;
 };
 
 export type UserRole = "superadmin" | "admin" | "user";
@@ -25,6 +27,8 @@ export type AuthUser = {
 	role: UserRole;
 	isBanned: boolean;
 	bannedAt: number | null;
+	mustChangePassword: boolean;
+	tempPasswordExpiresAt: number | null;
 };
 
 export function isAdmin(user: AuthUser) {
@@ -70,6 +74,8 @@ function mapUser(record: UserRecord): AuthUser {
 		role: (record.role as UserRole) ?? "user",
 		isBanned: Boolean(record.is_banned ?? 0),
 		bannedAt: record.banned_at ?? null,
+		mustChangePassword: Boolean(record.must_change_password ?? 0),
+		tempPasswordExpiresAt: record.temp_password_expires_at ?? null,
 	};
 }
 
@@ -239,7 +245,14 @@ type AuditEventType =
 	| "pwd_code_verify_ok"
 	| "pwd_code_verify_failed"
 	| "pwd_code_rate_limited"
-	| "pwd_code_locked";
+	| "pwd_code_locked"
+	| "admin_pwd_reset"
+	| "admin_pwd_reset_email_sent"
+	| "admin_pwd_reset_email_failed"
+	| "admin_pwd_reset_rolled_back"
+	| "pwd_changed"
+	| "pwd_changed_email_failed"
+	| "login_force_pwd_change";
 
 async function recordSecurityAuditEvent(args: {
 	context: AppLoadContext;
@@ -538,6 +551,16 @@ async function hashPassword(password: string, salt: string) {
 	return sha256(salt + ":" + password);
 }
 
+function validatePasswordStrengthServer(password: string) {
+	if (password.length < 6) {
+		return "密码长度至少为 6 位";
+	}
+	if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+		return "密码需要同时包含字母和数字";
+	}
+	return null;
+}
+
 function normalizeEmail(email: string) {
 	return String(email || "").trim().toLowerCase();
 }
@@ -609,6 +632,13 @@ export async function verifyLogin(
 	if (!record) {
 		return null;
 	}
+	if (
+		Boolean(record.must_change_password ?? 0) &&
+		record.temp_password_expires_at != null &&
+		record.temp_password_expires_at <= Date.now()
+	) {
+		return null;
+	}
 	const expected = await hashPassword(password, record.password_salt);
 	if (expected !== record.password_hash) {
 		return null;
@@ -633,11 +663,11 @@ export async function changePassword(
 	}
 	const salt = fromRandomBytes(16);
 	const hash = await hashPassword(newPassword, salt);
-	await execute(db, "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?", [
-		hash,
-		salt,
-		userId,
-	]);
+	await execute(
+		db,
+		"UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 0, temp_password_expires_at = NULL WHERE id = ?",
+		[hash, salt, userId],
+	);
 }
 
 export async function setPasswordByUserId(context: AppLoadContext, userId: number, newPassword: string) {
@@ -648,11 +678,11 @@ export async function setPasswordByUserId(context: AppLoadContext, userId: numbe
 	}
 	const salt = fromRandomBytes(16);
 	const hash = await hashPassword(newPassword, salt);
-	await execute(db, "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?", [
-		hash,
-		salt,
-		userId,
-	]);
+	await execute(
+		db,
+		"UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 0, temp_password_expires_at = NULL WHERE id = ?",
+		[hash, salt, userId],
+	);
 }
 
 export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId: number) {

@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { Link, useFetcher, useLoaderData, useNavigate, useSearchParams } from "@remix-run/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
 
@@ -58,6 +58,7 @@ export default function MePage() {
 	const [code, setCode] = useState("");
 	const [cooldown, setCooldown] = useState(0);
 	const [pwdMessage, setPwdMessage] = useState<string | null>(null);
+	const forcedOnceRef = useRef(false);
 
 	function maskEmail(email: string) {
 		const [local, domain] = email.split("@");
@@ -96,6 +97,29 @@ export default function MePage() {
 		next.delete("pwdVerify");
 		setSearchParams(next, { replace: true });
 	}, [searchParams, setSearchParams]);
+
+	useEffect(() => {
+		if (forcedOnceRef.current) {
+			return;
+		}
+		if (!me.mustChangePassword) {
+			return;
+		}
+		forcedOnceRef.current = true;
+		let reason = "系统检测到你正在使用临时密码登录，请立即修改密码";
+		if (me.tempPasswordExpiresAt) {
+			const diff = me.tempPasswordExpiresAt - Date.now();
+			if (diff > 0) {
+				const seconds = Math.floor(diff / 1000);
+				const minutes = Math.floor(seconds / 60);
+				const rest = seconds % 60;
+				reason = `系统检测到你正在使用临时密码登录，请立即修改密码（剩余 ${minutes}分${rest
+					.toString()
+					.padStart(2, "0")}秒）`;
+			}
+		}
+		openPwdModal(reason);
+	}, [me.mustChangePassword, me.tempPasswordExpiresAt]);
 
 	useEffect(() => {
 		const data = sendFetcher.data;

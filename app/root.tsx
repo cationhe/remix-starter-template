@@ -1,5 +1,5 @@
 import type { LinksFunction, LoaderFunctionArgs } from "@remix-run/cloudflare";
-import { json } from "@remix-run/cloudflare";
+import { json, redirect } from "@remix-run/cloudflare";
 import {
 	Link,
 	Links,
@@ -38,6 +38,17 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	let user: Awaited<ReturnType<typeof findUserById>> = null;
 	if (userId) {
 		user = await findUserById(context, userId);
+	}
+	if (user?.mustChangePassword) {
+		const pathname = new URL(request.url).pathname;
+		const allowed =
+			pathname === "/me" ||
+			pathname === "/me/password" ||
+			pathname === "/me/password-code" ||
+			pathname === "/logout";
+		if (!allowed) {
+			throw redirect("/me?pwdVerify=1&forcePwd=1");
+		}
 	}
 	return json<LoaderData>({ user });
 }

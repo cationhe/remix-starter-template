@@ -1,7 +1,8 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData } from "@remix-run/react";
-import { assertAdmin, assertNotBanned, requireUser, type UserRole } from "~/lib/auth.server";
+import { useEffect, useMemo, useState } from "react";
+import { assertAdmin, assertNotBanned, getClientIp, requireUser, sendEmail, type UserRole } from "~/lib/auth.server";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 
 type UserListItem = {
@@ -12,6 +13,8 @@ type UserListItem = {
 	role: string;
 	isBanned: number;
 	bannedAt: number | null;
+	mustChangePassword: number;
+	tempPasswordExpiresAt: number | null;
 };
 
 type ActionData = {
@@ -43,7 +46,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	const db = getDBFromContext(context);
 	const users = await queryAll<UserListItem>(
 		db,
-		"SELECT id as id, email as email, display_name as displayName, created_at as createdAt, role as role, is_banned as isBanned, banned_at as bannedAt FROM users ORDER BY created_at DESC LIMIT 200",
+		"SELECT id as id, email as email, display_name as displayName, created_at as createdAt, role as role, is_banned as isBanned, banned_at as bannedAt, must_change_password as mustChangePassword, temp_password_expires_at as tempPasswordExpiresAt FROM users ORDER BY created_at DESC LIMIT 200",
 	);
 	return json({ me, users });
 }
@@ -104,12 +107,197 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		return redirect("/admin/users");
 	}
 
+	if (intent === "resetPassword") {
+		if (target.role === "superadmin") {
+			return json<ActionData>({ formError: "不能重置超级管理员密码" }, { status: 400 });
+		}
+		if (me.role === "admin" && target.role !== "user") {
+			return json<ActionData>({ formError: "管理员只能重置普通用户密码" }, { status: 403 });
+		}
+		if (target.role === "admin" && me.role !== "superadmin") {
+			return json<ActionData>({ formError: "只有超级管理员可以重置管理员密码" }, { status: 403 });
+		}
+
+		const now = Date.now();
+		const tempPassword = "123456";
+		const expiresAt = now + 15 * 60 * 1000;
+		const ip = getClientIp(request);
+		const userAgent = request.headers.get("User-Agent");
+		let emailTo: string | null = null;
+
+		try {
+			await execute(db, "BEGIN");
+			const targetEmail = await queryOne<{ email: string }>(
+				db,
+				"SELECT email as email FROM users WHERE id = ?",
+				[targetUserId],
+			);
+			if (!targetEmail) {
+				await execute(db, "ROLLBACK");
+				return json<ActionData>({ formError: "用户不存在" }, { status: 404 });
+			}
+			emailTo = targetEmail.email;
+
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					targetUserId,
+					"admin_pwd_reset",
+					ip,
+					userAgent,
+					JSON.stringify({ operatorUserId: me.id, tempPasswordExpiresAt: expiresAt }),
+					now,
+				],
+			);
+
+			const existing = await queryOne<{ password_salt: string }>(
+				db,
+				"SELECT password_salt as password_salt FROM users WHERE id = ?",
+				[targetUserId],
+			);
+			if (!existing) {
+				await execute(db, "ROLLBACK");
+				return json<ActionData>({ formError: "用户不存在" }, { status: 404 });
+			}
+			const saltBytes = new Uint8Array(16);
+			crypto.getRandomValues(saltBytes);
+			const salt = Array.from(saltBytes)
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+			const encoder = new TextEncoder();
+			const hashBuffer = await crypto.subtle.digest(
+				"SHA-256",
+				encoder.encode(`${salt}:${tempPassword}`),
+			);
+			const passwordHash = Array.from(new Uint8Array(hashBuffer))
+				.map((b) => b.toString(16).padStart(2, "0"))
+				.join("");
+			await execute(
+				db,
+				"UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 1, temp_password_expires_at = ? WHERE id = ?",
+				[passwordHash, salt, expiresAt, targetUserId],
+			);
+			await execute(db, "COMMIT");
+		} catch {
+			try {
+				await execute(db, "ROLLBACK");
+			} catch {
+				return json<ActionData>({ formError: "重置失败，请稍后重试" }, { status: 500 });
+			}
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						targetUserId,
+						"admin_pwd_reset_rolled_back",
+						ip,
+						userAgent,
+						JSON.stringify({ operatorUserId: me.id }),
+						Date.now(),
+					],
+				);
+			} catch {
+				return json<ActionData>({ formError: "重置失败，请稍后重试" }, { status: 500 });
+			}
+			return json<ActionData>({ formError: "重置失败，请稍后重试" }, { status: 500 });
+		}
+
+		if (emailTo) {
+			const text =
+				`你的账号密码已被管理员重置为临时密码。\n\n` +
+				`临时密码：${tempPassword}\n` +
+				`有效期：15 分钟\n\n` +
+				`安全提示：请尽快使用临时密码登录，并立即修改为新密码（至少6位，包含字母和数字）。\n` +
+				`操作时间：${new Date(now).toLocaleString()}`;
+			try {
+				await sendEmail(context, {
+					to: emailTo,
+					subject: "密码已重置（临时密码）",
+					text,
+				});
+				try {
+					await execute(
+						db,
+						"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						[
+							targetUserId,
+							"admin_pwd_reset_email_sent",
+							ip,
+							userAgent,
+							JSON.stringify({ operatorUserId: me.id, to: emailTo }),
+							Date.now(),
+						],
+					);
+				} catch {
+					return redirect("/admin/users");
+				}
+				return redirect("/admin/users");
+			} catch (error) {
+				try {
+					await execute(
+						db,
+						"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						[
+							targetUserId,
+							"admin_pwd_reset_email_failed",
+							ip,
+							userAgent,
+							JSON.stringify({ operatorUserId: me.id, message: error instanceof Error ? error.message : "" }),
+							Date.now(),
+						],
+					);
+				} catch {
+					return redirect("/admin/users");
+				}
+				return redirect("/admin/users");
+			}
+		}
+
+		return redirect("/admin/users");
+	}
+
 	return json<ActionData>({ formError: "未知操作" }, { status: 400 });
 }
 
 export default function AdminUsersPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
+	const [query, setQuery] = useState("");
+	const [now, setNow] = useState(() => Date.now());
+
+	useEffect(() => {
+		const id = window.setInterval(() => setNow(Date.now()), 1000);
+		return () => window.clearInterval(id);
+	}, []);
+
+	const filtered = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		if (!q) {
+			return data.users;
+		}
+		return data.users.filter((u) => {
+			const id = String(u.id);
+			const email = String(u.email || "").toLowerCase();
+			const name = String(u.displayName || "").toLowerCase();
+			return id.includes(q) || email.includes(q) || name.includes(q);
+		});
+	}, [data.users, query]);
+
+	function formatRemaining(expiresAt: number | null, mustChangePassword: number) {
+		if (!mustChangePassword || !expiresAt) {
+			return "-";
+		}
+		const diff = expiresAt - now;
+		if (diff <= 0) {
+			return "已过期";
+		}
+		const totalSeconds = Math.floor(diff / 1000);
+		const minutes = Math.floor(totalSeconds / 60);
+		const seconds = totalSeconds % 60;
+		return `${minutes}分${seconds.toString().padStart(2, "0")}秒`;
+	}
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -132,6 +320,18 @@ export default function AdminUsersPage() {
 					</div>
 				) : null}
 
+				<div className="rounded-xl bg-white p-4 shadow dark:bg-gray-800">
+					<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">
+						搜索用户
+					</label>
+					<input
+						value={query}
+						onChange={(e) => setQuery(e.target.value)}
+						placeholder="按 ID / 邮箱 / 昵称搜索"
+						className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+					/>
+				</div>
+
 				<div className="overflow-hidden rounded-xl bg-white shadow dark:bg-gray-800">
 					<table className="w-full table-auto text-left text-sm">
 						<thead className="bg-gray-100 text-xs text-gray-600 dark:bg-gray-900/30 dark:text-gray-300">
@@ -141,17 +341,22 @@ export default function AdminUsersPage() {
 								<th className="px-4 py-3">昵称</th>
 								<th className="px-4 py-3">角色</th>
 								<th className="px-4 py-3">状态</th>
+								<th className="px-4 py-3">临时密码剩余</th>
 								<th className="px-4 py-3">注册时间</th>
 								<th className="px-4 py-3">操作</th>
 							</tr>
 						</thead>
 						<tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-							{data.users.map((u) => {
+							{filtered.map((u) => {
 								const banned = Boolean(u.isBanned);
 								const isSuperadmin = u.role === "superadmin";
 								const isSelf = u.id === data.me.id;
 								const canManageRole = data.me.role === "superadmin" && !isSuperadmin && !isSelf;
 								const canToggleBan = !isSelf && !isSuperadmin;
+								const canReset =
+									!isSelf &&
+									!isSuperadmin &&
+									(data.me.role === "superadmin" || u.role === "user");
 								return (
 									<tr key={u.id} className="text-gray-900 dark:text-gray-100">
 										<td className="px-4 py-3">{u.id}</td>
@@ -178,39 +383,67 @@ export default function AdminUsersPage() {
 													</button>
 												</Form>
 											) : (
-												<span className="text-gray-700 dark:text-gray-200">{u.role}</span>
-											)}
-										</td>
-										<td className="px-4 py-3">
-											{banned ? (
-												<span className="rounded bg-red-100 px-2 py-1 text-xs text-red-700 dark:bg-red-900/30 dark:text-red-200">封禁</span>
-											) : (
-												<span className="rounded bg-green-100 px-2 py-1 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-200">正常</span>
-											)}
-										</td>
-										<td className="px-4 py-3 text-gray-700 dark:text-gray-200">
-											{new Date(u.createdAt).toLocaleString()}
-										</td>
-										<td className="px-4 py-3">
-											{canToggleBan ? (
-												<Form method="post">
-													<input type="hidden" name="intent" value="toggleBan" />
-													<input type="hidden" name="userId" value={u.id} />
-													<button
-														type="submit"
-														className={
-														banned
-															? "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
-															: "rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700"
-													}
-													>
-														{banned ? "解封" : "封禁"}
-													</button>
-												</Form>
-											) : (
-												<span className="text-xs text-gray-500 dark:text-gray-400">不可操作</span>
-											)}
-										</td>
+													<span className="text-gray-700 dark:text-gray-200">{u.role}</span>
+												)}
+											</td>
+											<td className="px-4 py-3">
+												{banned ? (
+													<span className="rounded bg-red-100 px-2 py-1 text-xs text-red-700 dark:bg-red-900/30 dark:text-red-200">封禁</span>
+												) : (
+													<span className="rounded bg-green-100 px-2 py-1 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-200">正常</span>
+												)}
+											</td>
+											<td className="px-4 py-3 text-gray-700 dark:text-gray-200">
+												{formatRemaining(u.tempPasswordExpiresAt, u.mustChangePassword)}
+											</td>
+											<td className="px-4 py-3 text-gray-700 dark:text-gray-200">
+												{new Date(u.createdAt).toLocaleString()}
+											</td>
+											<td className="px-4 py-3">
+												<div className="flex flex-wrap items-center gap-2">
+													{canToggleBan ? (
+														<Form method="post">
+															<input type="hidden" name="intent" value="toggleBan" />
+															<input type="hidden" name="userId" value={u.id} />
+															<button
+																type="submit"
+																className={
+																	banned
+																		? "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+																		: "rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700"
+																}
+															>
+																{banned ? "解封" : "封禁"}
+															</button>
+													</Form>
+													) : null}
+													{canReset ? (
+														<Form
+															method="post"
+															onSubmit={(e) => {
+																const ok = window.confirm(
+																	`确认将该用户密码重置为临时密码 123456 吗？\n\n用户：${u.email}\n角色：${u.role}\n有效期：15分钟`,
+																);
+																if (!ok) {
+																	e.preventDefault();
+																}
+															}}
+														>
+															<input type="hidden" name="intent" value="resetPassword" />
+															<input type="hidden" name="userId" value={u.id} />
+															<button
+																type="submit"
+																className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-white hover:bg-amber-700"
+															>
+																重置密码
+															</button>
+														</Form>
+													) : null}
+													{!canToggleBan && !canReset ? (
+														<span className="text-xs text-gray-500 dark:text-gray-400">不可操作</span>
+													) : null}
+												</div>
+											</td>
 									</tr>
 								);
 							})}

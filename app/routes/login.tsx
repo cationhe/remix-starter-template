@@ -9,6 +9,7 @@ import {
 	resetRateLimit,
 	verifyLogin,
 } from "~/lib/auth.server";
+import { execute, getDBFromContext } from "~/lib/d1.server";
 import { commitSession, getSession } from "~/lib/session.server";
 
 type ActionData = {
@@ -126,9 +127,27 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		return json<ActionData>({ formError: "账号已被封禁" }, { status: 403 });
 	}
 	await promoteToSuperadminIfMatch(context, user.id);
+	if (user.mustChangePassword) {
+		try {
+			await execute(
+				getDBFromContext(context),
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"login_force_pwd_change",
+					ip,
+					request.headers.get("User-Agent"),
+					JSON.stringify({ tempPasswordExpiresAt: user.tempPasswordExpiresAt }),
+					Date.now(),
+				],
+			);
+		} catch {
+		}
+	}
 	const session = await getSession(request, context);
 	session.set("userId", user.id);
-	return redirect("/", {
+	const next = user.mustChangePassword ? "/me?pwdVerify=1&forcePwd=1" : "/";
+	return redirect(next, {
 		headers: {
 			"Set-Cookie": await commitSession(session, context),
 		},
