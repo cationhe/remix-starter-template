@@ -48,6 +48,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				{ status: 500 },
 			);
 		}
+		if (message === "EMAIL_SEND_FAILED_ALL_PROVIDERS") {
+			return json<ActionData>({ ok: false, message: "邮件发送失败（所有通道均失败）" }, { status: 500 });
+		}
 		if (message === "EMAIL_SEND_FAILED") {
 			return json<ActionData>({ ok: false, message: "邮件发送失败，请重试" }, { status: 500 });
 		}

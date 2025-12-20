@@ -129,6 +129,17 @@ async function resendSendEmail(context: AppLoadContext, args: { to: string; subj
 		}),
 	});
 	if (!resp.ok) {
+		let bodyText = "";
+		try {
+			bodyText = (await resp.text())
+				.replace(/\s+/g, " ")
+				.replace(/\u0000/g, "")
+				.slice(0, 500)
+				.trim();
+		} catch {
+			bodyText = "";
+		}
+		console.error("resend_send_failed", { status: resp.status, bodyText });
 		if (resp.status === 401 || resp.status === 403) {
 			throw new Error("RESEND_API_KEY_INVALID");
 		}
@@ -169,6 +180,17 @@ async function mailchannelsSendEmail(
 		}),
 	});
 	if (!resp.ok) {
+		let bodyText = "";
+		try {
+			bodyText = (await resp.text())
+				.replace(/\s+/g, " ")
+				.replace(/\u0000/g, "")
+				.slice(0, 500)
+				.trim();
+		} catch {
+			bodyText = "";
+		}
+		console.error("mailchannels_send_failed", { status: resp.status, bodyText });
 		throw new Error("EMAIL_SEND_FAILED");
 	}
 }
@@ -187,12 +209,20 @@ export async function sendEmail(context: AppLoadContext, args: { to: string; sub
 			return await resendSendEmail(context, args);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "";
+			if (message === "EMAIL_NOT_CONFIGURED") {
+				throw error;
+			}
 			if (message === "RESEND_API_KEY_INVALID") {
 				try {
 					return await mailchannelsSendEmail(context, args);
 				} catch {
 					throw new Error("RESEND_API_KEY_INVALID_FALLBACK_FAILED");
 				}
+			}
+			try {
+				return await mailchannelsSendEmail(context, args);
+			} catch {
+				throw new Error("EMAIL_SEND_FAILED_ALL_PROVIDERS");
 			}
 			throw error;
 		}
