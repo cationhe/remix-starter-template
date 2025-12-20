@@ -22,6 +22,12 @@
 			"database_id": "8f8e4030-d303-4077-b3ae-f9d6567bb7a3"
 		}
 	],
+	"r2_buckets": [
+		{
+			"binding": "ATTACHMENTS",
+			"bucket_name": "forum-attachments"
+		}
+	],
 	"assets": {
 		"directory": "./build/client"
 	},

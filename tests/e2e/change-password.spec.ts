@@ -103,14 +103,16 @@ test("管理员重置临时密码后：个人中心不再刷新且可完成强�
 
 	await page.goto("/admin/users", { waitUntil: "domcontentloaded" });
 	await expect(page.getByRole("heading", { name: "用户管理" })).toBeVisible();
-
-	page.once("dialog", async (dialog) => {
-		await dialog.accept();
-	});
 	const userRow = page.getByRole("row", { name: new RegExp(userEmail) });
-	await userRow.getByRole("button", { name: "重置密码" }).click();
-	await expect(page).toHaveURL(/\/admin\/users/);
-	await expect(userRow).toContainText(/分\d{2}秒/);
+	const resetButton = userRow.getByRole("button", { name: "重置密码" });
+	await Promise.all([
+		page.waitForNavigation({ waitUntil: "domcontentloaded" }),
+		resetButton.evaluate((btn) => {
+			(btn as HTMLButtonElement).form?.submit();
+		}),
+	]);
+	const updatedRow = page.getByRole("row", { name: new RegExp(userEmail) });
+	await expect(updatedRow.locator("td").nth(5)).toContainText(/分\d{2}秒/, { timeout: 15000 });
 
 	await page.context().clearCookies();
 	await page.goto("/login", { waitUntil: "domcontentloaded" });

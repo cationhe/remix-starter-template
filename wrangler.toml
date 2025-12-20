@@ -14,6 +14,10 @@ database_name = "forum_db"
 database_id = "8f8e4030-d303-4077-b3ae-f9d6567bb7a3"
 migrations_dir = "migrations"
 
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "forum-attachments"
+
 [observability]
 enabled = true
 
