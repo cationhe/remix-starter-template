@@ -86,14 +86,28 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				const status = typeof (error as any)?.status === "number" ? Number((error as any).status) : 0;
 				const detail = typeof (error as any)?.detail === "string" ? String((error as any).detail) : "";
 				const detailLower = detail.toLowerCase();
+				const triedFallback = detailLower.includes("fallback:");
 				if (status === 401) {
-					return json<ActionData>({ formError: "RESEND_API_KEY 无效或无权限" }, { status: 500 });
+					return json<ActionData>(
+						{ formError: triedFallback ? "RESEND_API_KEY 无效或无权限（已尝试回退发送仍失败）" : "RESEND_API_KEY 无效或无权限" },
+						{ status: 500 },
+					);
 				}
 				if (status === 403) {
-					return json<ActionData>({ formError: "发件域名未验证或 EMAIL_FROM 不被允许" }, { status: 500 });
+					return json<ActionData>(
+						{
+							formError: triedFallback
+								? "发件域名未验证或 EMAIL_FROM 不被允许（已尝试回退发送仍失败）"
+								: "发件域名未验证或 EMAIL_FROM 不被允许",
+						},
+						{ status: 500 },
+					);
 				}
 				if (status === 422) {
-					return json<ActionData>({ formError: "EMAIL_FROM 配置不正确" }, { status: 500 });
+					return json<ActionData>(
+						{ formError: triedFallback ? "EMAIL_FROM 配置不正确（已尝试回退发送仍失败）" : "EMAIL_FROM 配置不正确" },
+						{ status: 500 },
+					);
 				}
 				if (status === 429) {
 					return json<ActionData>({ formError: "发送过于频繁，请稍后再试" }, { status: 500 });
@@ -110,7 +124,19 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				if (detailLower.includes("from") && (detailLower.includes("invalid") || detailLower.includes("missing"))) {
 					return json<ActionData>({ formError: "EMAIL_FROM 配置不正确" }, { status: 500 });
 				}
-				return json<ActionData>({ formError: "邮件发送失败，请检查 Resend 域名验证与发件人配置" }, { status: 500 });
+				const compactDetail = detail
+					.replace(/\s+/g, " ")
+					.replace(/\u0000/g, "")
+					.slice(0, 300)
+					.trim();
+				return json<ActionData>(
+					{
+						formError: compactDetail
+							? `邮件发送失败，请检查 Resend 域名验证与发件人配置（错误详情：${compactDetail}）`
+							: "邮件发送失败，请检查 Resend 域名验证与发件人配置",
+					},
+					{ status: 500 },
+				);
 			}
 			return json<ActionData>({ formError: "邮件发送失败，请稍后重试" }, { status: 500 });
 		}
