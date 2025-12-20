@@ -1,12 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams } from "@remix-run/react";
-import {
-	assertPasswordChangeVerified,
-	changePassword,
-	clearPasswordChangeVerified,
-	requireUser,
-} from "~/lib/auth.server";
+import { changePassword, requireUser } from "~/lib/auth.server";
 
 type ActionData = {
 	fieldErrors?: {
@@ -33,19 +28,11 @@ function validatePasswordStrength(password: string) {
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
-	const verified = await assertPasswordChangeVerified(context, me.id);
-	if (!verified) {
-		throw redirect("/me?pwdVerify=1");
-	}
 	return json<LoaderData>({ me });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
-	const verified = await assertPasswordChangeVerified(context, me.id);
-	if (!verified) {
-		return redirect("/me?pwdVerify=1");
-	}
 	const formData = await request.formData();
 	const oldPassword = String(formData.get("oldPassword") || "");
 	const newPassword = String(formData.get("newPassword") || "");
@@ -74,7 +61,6 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	try {
 		await changePassword(context, me.id, oldPassword, newPassword);
-		await clearPasswordChangeVerified(context, me.id);
 		return redirect("/me/password?success=1");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";

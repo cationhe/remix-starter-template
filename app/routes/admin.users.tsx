@@ -126,40 +126,16 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		let emailTo: string | null = null;
 
 		try {
-			await execute(db, "BEGIN");
 			const targetEmail = await queryOne<{ email: string }>(
 				db,
 				"SELECT email as email FROM users WHERE id = ?",
 				[targetUserId],
 			);
 			if (!targetEmail) {
-				await execute(db, "ROLLBACK");
 				return json<ActionData>({ formError: "用户不存在" }, { status: 404 });
 			}
 			emailTo = targetEmail.email;
 
-			await execute(
-				db,
-				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-				[
-					targetUserId,
-					"admin_pwd_reset",
-					ip,
-					userAgent,
-					JSON.stringify({ operatorUserId: me.id, tempPasswordExpiresAt: expiresAt }),
-					now,
-				],
-			);
-
-			const existing = await queryOne<{ password_salt: string }>(
-				db,
-				"SELECT password_salt as password_salt FROM users WHERE id = ?",
-				[targetUserId],
-			);
-			if (!existing) {
-				await execute(db, "ROLLBACK");
-				return json<ActionData>({ formError: "用户不存在" }, { status: 404 });
-			}
 			const saltBytes = new Uint8Array(16);
 			crypto.getRandomValues(saltBytes);
 			const salt = Array.from(saltBytes)
@@ -173,33 +149,46 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			const passwordHash = Array.from(new Uint8Array(hashBuffer))
 				.map((b) => b.toString(16).padStart(2, "0"))
 				.join("");
+
 			await execute(
 				db,
 				"UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 1, temp_password_expires_at = ? WHERE id = ?",
 				[passwordHash, salt, expiresAt, targetUserId],
 			);
-			await execute(db, "COMMIT");
-		} catch {
-			try {
-				await execute(db, "ROLLBACK");
-			} catch {
-				return json<ActionData>({ formError: "重置失败，请稍后重试" }, { status: 500 });
-			}
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					targetUserId,
+					"admin_pwd_reset",
+					ip,
+					userAgent,
+					JSON.stringify({ operatorUserId: me.id, tempPasswordExpiresAt: expiresAt }),
+					now,
+				],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
 			try {
 				await execute(
 					db,
 					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 					[
 						targetUserId,
-						"admin_pwd_reset_rolled_back",
+						"admin_pwd_reset_failed",
 						ip,
 						userAgent,
-						JSON.stringify({ operatorUserId: me.id }),
+						JSON.stringify({ operatorUserId: me.id, message }),
 						Date.now(),
 					],
 				);
 			} catch {
-				return json<ActionData>({ formError: "重置失败，请稍后重试" }, { status: 500 });
+			}
+			if (message.includes("no such table")) {
+				return json<ActionData>({ formError: "数据库未初始化：缺少必要的数据表" }, { status: 500 });
+			}
+			if (message.includes("no such column")) {
+				return json<ActionData>({ formError: "数据库未升级：请先应用最新迁移" }, { status: 500 });
 			}
 			return json<ActionData>({ formError: "重置失败，请稍后重试" }, { status: 500 });
 		}
