@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams } from "@remix-run/react";
+import { Form, useActionData, useLoaderData, useNavigation, useSearchParams } from "@remix-run/react";
 import { changePassword, requireUser, setPasswordByUserId } from "~/lib/auth.server";
 
 type ActionData = {
@@ -110,12 +110,12 @@ export default function ChangePasswordPage() {
 							</p>
 						) : null}
 					</div>
-					<Link
-						to="/me"
+					<a
+						href="/me"
 						className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-900"
 					>
 						关闭
-					</Link>
+					</a>
 				</header>
 
 				<div className="px-6 py-5">
@@ -128,10 +128,14 @@ export default function ChangePasswordPage() {
 					<Form method="post" className="space-y-5">
 						{!force ? (
 							<div>
-								<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+								<label
+									htmlFor="change-password-old"
+									className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+								>
 									旧密码
 								</label>
 								<input
+									id="change-password-old"
 									name="oldPassword"
 									type="password"
 									required
@@ -146,10 +150,14 @@ export default function ChangePasswordPage() {
 							<input type="hidden" name="oldPassword" value="" />
 						)}
 						<div>
-							<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+							<label
+								htmlFor="change-password-new"
+								className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+							>
 								新密码
 							</label>
 							<input
+								id="change-password-new"
 								name="newPassword"
 								type="password"
 								required
@@ -164,10 +172,14 @@ export default function ChangePasswordPage() {
 							)}
 						</div>
 						<div>
-							<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+							<label
+								htmlFor="change-password-confirm"
+								className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+							>
 								确认新密码
 							</label>
 							<input
+								id="change-password-confirm"
 								name="confirmNewPassword"
 								type="password"
 								required

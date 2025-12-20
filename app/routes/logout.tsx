@@ -6,7 +6,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	const session = await getSession(request, context);
 	return redirect("/", {
 		headers: {
-			"Set-Cookie": await destroySession(session, context),
+			"Set-Cookie": await destroySession(session, request, context),
 		},
 	});
 }
@@ -14,4 +14,3 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 export default function Logout() {
 	return null;
 }
-

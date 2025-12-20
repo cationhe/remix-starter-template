@@ -101,7 +101,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		session.set("userId", user.id);
 		return redirect("/", {
 			headers: {
-				"Set-Cookie": await commitSession(session, context),
+				"Set-Cookie": await commitSession(session, request, context),
 			},
 		});
 	} catch (error) {
@@ -121,10 +121,14 @@ export default function Register() {
 				</h1>
 				<Form method="post" className="space-y-5">
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+						<label
+							htmlFor="register-email"
+							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+						>
 							邮箱
 						</label>
 						<input
+							id="register-email"
 							name="email"
 							type="email"
 							required
@@ -135,10 +139,14 @@ export default function Register() {
 						) : null}
 					</div>
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+						<label
+							htmlFor="register-display-name"
+							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+						>
 							昵称
 						</label>
 						<input
+							id="register-display-name"
 							name="displayName"
 							required
 							className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
@@ -148,10 +156,14 @@ export default function Register() {
 						) : null}
 					</div>
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+						<label
+							htmlFor="register-password"
+							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+						>
 							密码
 						</label>
 						<input
+							id="register-password"
 							name="password"
 							type="password"
 							required
@@ -162,10 +174,14 @@ export default function Register() {
 						) : null}
 					</div>
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+						<label
+							htmlFor="register-confirm-password"
+							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+						>
 							确认密码
 						</label>
 						<input
+							id="register-confirm-password"
 							name="confirmPassword"
 							type="password"
 							required

@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, Outlet, useLoaderData, useNavigate, useSearchParams } from "@remix-run/react";
+import { Link, Outlet, useLoaderData, useSearchParams } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
@@ -49,7 +49,6 @@ export default function MePage() {
 	const me = data.me;
 	const isBanned = Boolean(me.isBanned);
 	const [searchParams] = useSearchParams();
-	const navigate = useNavigate();
 	const [navError, setNavError] = useState<string | null>(null);
 	const forcedOnceRef = useRef(false);
 	const pwdChanged = searchParams.get("pwdChanged") === "1";
@@ -79,11 +78,7 @@ export default function MePage() {
 
 	function openPwdModal(reason?: string) {
 		setNavError(reason ?? null);
-		try {
-			navigate(reason ? "/me/password?force=1" : "/me/password");
-		} catch {
-			window.location.href = reason ? "/me/password?force=1" : "/me/password";
-		}
+		window.location.href = reason ? "/me/password?force=1" : "/me/password";
 	}
 
 	return (
@@ -145,13 +140,12 @@ export default function MePage() {
 						</div>
 					) : null}
 					<div className="mt-4 flex flex-wrap items-center gap-2">
-						<button
-							type="button"
-							onClick={() => openPwdModal()}
+						<a
+							href="/me/password"
 							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 						>
 							修改密码
-						</button>
+						</a>
 					</div>
 					<dl className="mt-4 grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
 						<div>

@@ -5,14 +5,18 @@ function getEnv(context: AppLoadContext): Env {
 	return (context as any).cloudflare.env as Env;
 }
 
-function getSessionStorage(context: AppLoadContext) {
+function isSecureRequest(request: Request) {
+	return new URL(request.url).protocol === "https:";
+}
+
+function getSessionStorage(context: AppLoadContext, secure: boolean) {
 	const env = getEnv(context);
 	const secret = env.SESSION_SECRET || "dev-only-session-secret-change-me";
 	return createCookieSessionStorage({
 		cookie: {
 			name: "__forum_session",
 			secrets: [secret],
-			secure: true,
+			secure,
 			sameSite: "lax",
 			path: "/",
 			httpOnly: true,
@@ -21,17 +25,17 @@ function getSessionStorage(context: AppLoadContext) {
 }
 
 export async function getSession(request: Request, context: AppLoadContext) {
-	const storage = getSessionStorage(context);
+	const storage = getSessionStorage(context, isSecureRequest(request));
 	const cookie = request.headers.get("Cookie");
 	return storage.getSession(cookie);
 }
 
-export async function commitSession(session: Session, context: AppLoadContext) {
-	const storage = getSessionStorage(context);
+export async function commitSession(session: Session, request: Request, context: AppLoadContext) {
+	const storage = getSessionStorage(context, isSecureRequest(request));
 	return storage.commitSession(session);
 }
 
-export async function destroySession(session: Session, context: AppLoadContext) {
-	const storage = getSessionStorage(context);
+export async function destroySession(session: Session, request: Request, context: AppLoadContext) {
+	const storage = getSessionStorage(context, isSecureRequest(request));
 	return storage.destroySession(session);
 }

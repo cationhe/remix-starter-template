@@ -21,6 +21,7 @@
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4.20250425.0",
+		"@playwright/test": "^1.57.0",
 		"@remix-run/dev": "2.17.2",
 		"@types/react": "^18.0.0",
 		"@types/react-dom": "^18.0.0",
@@ -51,6 +52,7 @@
 		"deploy": "wrangler deploy",
 		"dev": "remix vite:dev",
 		"lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
+		"test:e2e": "playwright test",
 		"preview": "npm run build && wrangler dev",
 		"start": "wrangler dev",
 		"typecheck": "tsc",

@@ -149,7 +149,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const next = user.mustChangePassword ? "/me/password?force=1" : "/";
 	return redirect(next, {
 		headers: {
-			"Set-Cookie": await commitSession(session, context),
+			"Set-Cookie": await commitSession(session, request, context),
 		},
 	});
 }
@@ -173,10 +173,14 @@ export default function Login() {
 				) : null}
 				<Form method="post" className="space-y-5">
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+						<label
+							htmlFor="login-email"
+							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+						>
 							邮箱
 						</label>
 						<input
+							id="login-email"
 							name="email"
 							type="email"
 							required
@@ -187,10 +191,14 @@ export default function Login() {
 						) : null}
 					</div>
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
+						<label
+							htmlFor="login-password"
+							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+						>
 							密码
 						</label>
 						<input
+							id="login-password"
 							name="password"
 							type="password"
 							required

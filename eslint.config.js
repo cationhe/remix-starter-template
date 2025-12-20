@@ -6,6 +6,9 @@ import jsxA11yPlugin from "eslint-plugin-jsx-a11y";
 import importPlugin from "eslint-plugin-import";
 
 export default [
+	{
+		ignores: [".wrangler/**", "build/**", "test-results/**"],
+	},
   {
     files: ["**/*.{js,jsx,ts,tsx}"],
     languageOptions: {
