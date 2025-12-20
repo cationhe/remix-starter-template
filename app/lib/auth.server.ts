@@ -171,7 +171,8 @@ async function mailchannelsSendEmail(
 }
 
 export async function sendEmail(context: AppLoadContext, args: { to: string; subject: string; text: string }) {
-	const provider = getEnvString(context, "EMAIL_PROVIDER").toLowerCase();
+	const providerRaw = getEnvString(context, "EMAIL_PROVIDER").toLowerCase();
+	const provider = providerRaw === "auto" ? "" : providerRaw;
 	const hasResendKey = Boolean(getEnvString(context, "RESEND_API_KEY"));
 	const selected = provider || (hasResendKey ? "resend" : "mailchannels");
 	if (selected === "mailchannels") {
