@@ -2,6 +2,12 @@
 	"name": "remix-starter-template",
 	"compatibility_date": "2025-10-08",
 	"main": "./server.ts",
+	"routes": [
+		{
+			"pattern": "7103308.cfd/*",
+			"zone_name": "7103308.cfd"
+		}
+	],
 	"vars": {
 		"SESSION_SECRET": "dev-only-session-secret-change-me",
 		"SUPERADMIN_EMAIL": "7103308@qq.com",
