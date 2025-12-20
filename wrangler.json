@@ -4,7 +4,10 @@
 	"main": "./server.ts",
 	"vars": {
 		"SESSION_SECRET": "dev-only-session-secret-change-me",
-		"SUPERADMIN_EMAIL": "kationhe007@gmail.com"
+		"SUPERADMIN_EMAIL": "kationhe007@gmail.com",
+		"PUBLIC_BASE_URL": "https://7103308.cfd",
+		"EMAIL_PROVIDER": "mailchannels",
+		"EMAIL_FROM": "noreply@7103308.cfd"
 	},
 	"d1_databases": [
 		{

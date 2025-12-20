@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useNavigation } from "@remix-run/react";
-import { findUserByEmail } from "~/lib/auth.server";
+import { findUserByEmail, sendEmail } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 
 type ActionData = {
@@ -11,10 +11,6 @@ type ActionData = {
 	formError?: string;
 	ok?: boolean;
 };
-
-function getEnv(context: unknown): Env {
-	return (context as any).cloudflare.env as Env;
-}
 
 function toHex(data: Uint8Array) {
 	return Array.from(data)
@@ -35,29 +31,6 @@ async function sha256(input: string) {
 	return toHex(new Uint8Array(hashBuffer));
 }
 
-async function sendResetEmail(args: {
-	apiKey: string;
-	from: string;
-	to: string;
-	resetUrl: string;
-}) {
-	const resp = await fetch("https://api.resend.com/emails", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${args.apiKey}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({
-			from: args.from,
-			to: args.to,
-			subject: "重置密码",
-			text: `你正在重置论坛账号密码。请在 60 分钟内打开链接并设置新密码：\n\n${args.resetUrl}\n\n如果不是你本人操作，请忽略这封邮件。`,
-		}),
-	});
-	if (!resp.ok) {
-		throw new Error("EMAIL_SEND_FAILED");
-	}
-}
 
 export async function loader({}: LoaderFunctionArgs) {
 	return json({});
@@ -77,12 +50,12 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	const user = await findUserByEmail(context, email);
 	if (user) {
-		const env = getEnv(context);
-		const baseUrl = String((env as any).PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
-		const from = String((env as any).EMAIL_FROM || "").trim();
-		const apiKey = String((env as any).RESEND_API_KEY || "").trim();
-		if (!baseUrl || !from || !apiKey) {
-			return json<ActionData>({ formError: "邮件服务未配置" }, { status: 500 });
+		const env = (context as any).cloudflare?.env as any;
+		const baseUrl = String(env?.PUBLIC_BASE_URL || "")
+			.trim()
+			.replace(/\/$/, "");
+		if (!baseUrl) {
+			return json<ActionData>({ formError: "站点地址未配置" }, { status: 500 });
 		}
 		const token = randomTokenHex(32);
 		const tokenHash = await sha256(`reset:${token}`);
@@ -98,7 +71,22 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		);
 
 		const resetUrl = `${baseUrl}/reset-password?token=${encodeURIComponent(token)}`;
-		await sendResetEmail({ apiKey, from, to: user.email, resetUrl });
+		try {
+			await sendEmail(context, {
+				to: user.email,
+				subject: "重置密码",
+				text: `你正在重置论坛账号密码。请在 60 分钟内打开链接并设置新密码：\n\n${resetUrl}\n\n如果不是你本人操作，请忽略这封邮件。`,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message === "EMAIL_NOT_CONFIGURED") {
+				return json<ActionData>({ formError: "邮件服务未配置" }, { status: 500 });
+			}
+			if (message === "EMAIL_SEND_FAILED") {
+				return json<ActionData>({ formError: "邮件发送失败，请稍后重试" }, { status: 500 });
+			}
+			return json<ActionData>({ formError: "邮件发送失败，请稍后重试" }, { status: 500 });
+		}
 	}
 
 	return json<ActionData>({ ok: true });
@@ -163,4 +151,3 @@ export default function ForgotPasswordPage() {
 		</div>
 	);
 }
-

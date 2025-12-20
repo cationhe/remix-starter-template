@@ -133,6 +133,53 @@ async function resendSendEmail(context: AppLoadContext, args: { to: string; subj
 	}
 }
 
+function parseEmailAddress(input: string) {
+	const trimmed = input.trim();
+	const match = trimmed.match(/^(.*)<\s*([^>\s]+)\s*>\s*$/);
+	if (!match) {
+		return { email: trimmed };
+	}
+	const name = match[1].trim().replace(/^"|"$/g, "");
+	const email = match[2].trim();
+	return name ? { email, name } : { email };
+}
+
+async function mailchannelsSendEmail(
+	context: AppLoadContext,
+	args: { to: string; subject: string; text: string },
+) {
+	const fromRaw = getEnvString(context, "EMAIL_FROM");
+	if (!fromRaw) {
+		throw new Error("EMAIL_NOT_CONFIGURED");
+	}
+	const from = parseEmailAddress(fromRaw);
+	const resp = await fetch("https://api.mailchannels.net/tx/v1/send", {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			personalizations: [{ to: [{ email: args.to }] }],
+			from,
+			subject: args.subject,
+			content: [{ type: "text/plain", value: args.text }],
+		}),
+	});
+	if (!resp.ok) {
+		throw new Error("EMAIL_SEND_FAILED");
+	}
+}
+
+export async function sendEmail(context: AppLoadContext, args: { to: string; subject: string; text: string }) {
+	const provider = getEnvString(context, "EMAIL_PROVIDER").toLowerCase();
+	const hasResendKey = Boolean(getEnvString(context, "RESEND_API_KEY"));
+	const selected = provider || (hasResendKey ? "resend" : "mailchannels");
+	if (selected === "mailchannels") {
+		return mailchannelsSendEmail(context, args);
+	}
+	return resendSendEmail(context, args);
+}
+
 type AuditEventType =
 	| "pwd_code_send"
 	| "pwd_code_send_failed"
@@ -304,7 +351,7 @@ export async function sendPasswordChangeCode(args: {
 		`操作时间：${new Date(now).toLocaleString()}`;
 
 	try {
-		await resendSendEmail(args.context, {
+		await sendEmail(args.context, {
 			to: args.user.email,
 			subject: "修改密码验证码",
 			text,
