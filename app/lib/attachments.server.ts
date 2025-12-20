@@ -66,7 +66,11 @@ function getEnv(context: AppLoadContext): Env {
 }
 
 export function getAttachmentsBucket(context: AppLoadContext): R2Bucket {
-	return (getEnv(context) as any).ATTACHMENTS as R2Bucket;
+	const bucket = (getEnv(context) as any).ATTACHMENTS as R2Bucket | undefined;
+	if (!bucket) {
+		throw new Response("附件存储未启用：请先在 Cloudflare Dashboard 开启 R2 并绑定存储桶", { status: 503 });
+	}
+	return bucket;
 }
 
 function randomHex(bytes: number) {
