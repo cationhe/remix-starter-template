@@ -206,6 +206,9 @@ async function mailchannelsSendEmail(
 
 export async function sendEmail(context: AppLoadContext, args: { to: string; subject: string; text: string }) {
 	const providerRaw = getEnvString(context, "EMAIL_PROVIDER").toLowerCase();
+	if (providerRaw === "disabled") {
+		return;
+	}
 	const provider = providerRaw === "auto" ? "" : providerRaw;
 	const isAuto = !providerRaw || providerRaw === "auto";
 	const hasResendKey = Boolean(getEnvString(context, "RESEND_API_KEY"));
@@ -687,8 +690,7 @@ export async function setPasswordByUserId(context: AppLoadContext, userId: numbe
 
 export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId: number) {
 	try {
-		const env = getEnv(context);
-		const superadminEmail = String(env.SUPERADMIN_EMAIL || "").trim().toLowerCase();
+		const superadminEmail = getEnvString(context, "SUPERADMIN_EMAIL").toLowerCase();
 		if (!superadminEmail) {
 			return;
 		}

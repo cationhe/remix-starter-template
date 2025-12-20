@@ -15,18 +15,7 @@ import { getSession } from "~/lib/session.server";
 
 import "./tailwind.css";
 
-export const links: LinksFunction = () => [
-	{ rel: "preconnect", href: "https://fonts.googleapis.com" },
-	{
-		rel: "preconnect",
-		href: "https://fonts.gstatic.com",
-		crossOrigin: "anonymous",
-	},
-	{
-		rel: "stylesheet",
-		href: "https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap",
-	},
-];
+export const links: LinksFunction = () => [];
 
 type LoaderData = {
 	user: Awaited<ReturnType<typeof findUserById>>;
@@ -113,12 +102,20 @@ export default function App() {
 									个人中心
 								</Link>
 								{showAdmin ? (
-									<Link
-										to="/admin/users"
-										className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-									>
-										用户管理
-									</Link>
+									<>
+										<Link
+											to="/admin/users"
+											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+										>
+											用户管理
+										</Link>
+										<Link
+											to="/admin/attachments"
+											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+										>
+											附件管理
+										</Link>
+									</>
 								) : null}
 								<Link
 									to="/logout"

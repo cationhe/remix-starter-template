@@ -176,6 +176,16 @@ export async function listAttachmentsByPostId(context: AppLoadContext, postId: n
 	return rows;
 }
 
+export async function getAttachmentById(context: AppLoadContext, attachmentId: number) {
+	const db = getDBFromContext(context);
+	const row = await queryOne<AttachmentRecord>(
+		db,
+		"SELECT id as id, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, created_at as createdAt FROM attachments WHERE id = ?",
+		[attachmentId],
+	);
+	return row;
+}
+
 export async function createUploadRecord(args: {
 	context: AppLoadContext;
 	postId: number;
@@ -260,7 +270,12 @@ export async function saveUploadedPart(args: {
 	const db = getDBFromContext(args.context);
 	await execute(
 		db,
-		"INSERT INTO attachment_upload_parts (upload_record_id, part_number, etag, size_bytes, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(upload_record_id, part_number) DO UPDATE SET etag = excluded.etag, size_bytes = excluded.size_bytes",
+		"DELETE FROM attachment_upload_parts WHERE upload_record_id = ? AND part_number = ?",
+		[args.uploadRecordId, args.partNumber],
+	);
+	await execute(
+		db,
+		"INSERT INTO attachment_upload_parts (upload_record_id, part_number, etag, size_bytes, created_at) VALUES (?, ?, ?, ?, ?)",
 		[args.uploadRecordId, args.partNumber, args.etag, args.sizeBytes, Date.now()],
 	);
 }
@@ -299,6 +314,31 @@ export async function removeAttachmentRecord(context: AppLoadContext, attachment
 	await execute(db, "DELETE FROM attachments WHERE id = ?", [attachmentId]);
 	const bucket = getAttachmentsBucket(context);
 	await bucket.delete(record.r2Key);
+}
+
+export async function removeAllAttachmentsForPost(context: AppLoadContext, postId: number) {
+	const db = getDBFromContext(context);
+	const rows = await queryAll<{ id: number; r2Key: string }>(
+		db,
+		"SELECT id as id, r2_key as r2Key FROM attachments WHERE post_id = ?",
+		[postId],
+	);
+	await execute(db, "DELETE FROM attachments WHERE post_id = ?", [postId]);
+	await execute(db, "DELETE FROM attachment_upload_parts WHERE upload_record_id IN (SELECT id FROM attachment_uploads WHERE post_id = ?)", [postId]);
+	await execute(db, "DELETE FROM attachment_uploads WHERE post_id = ?", [postId]);
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	if (!bucket) return;
+	for (const item of rows) {
+		try {
+			await bucket.delete(item.r2Key);
+		} catch {
+		}
+	}
 }
 
 async function sha256(input: string) {

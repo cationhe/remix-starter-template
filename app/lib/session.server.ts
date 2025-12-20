@@ -11,7 +11,7 @@ function isSecureRequest(request: Request) {
 
 function getSessionStorage(context: AppLoadContext, secure: boolean) {
 	const env = getEnv(context);
-	const secret = env.SESSION_SECRET || "dev-only-session-secret-change-me";
+	const secret = String((env as any).SESSION_SECRET || "dev-only-session-secret-change-me");
 	return createCookieSessionStorage({
 		cookie: {
 			name: "__forum_session",

@@ -15,7 +15,7 @@ export default defineConfig({
 	},
 	webServer: {
 		command:
-			"npm run build && rm -rf .wrangler/state/v3/d1/miniflare-D1DatabaseObject && npx wrangler d1 migrations apply forum_db --local --config wrangler.json && npx wrangler dev --port 8788",
+			"CI=1 npm run build && rm -rf .wrangler/state/v3/d1/miniflare-D1DatabaseObject && printf 'y\\n' | CI=1 npx wrangler d1 migrations apply forum_db --local --config wrangler.json && CI=1 npx wrangler dev --port 8788 --ip 127.0.0.1 --var EMAIL_PROVIDER:disabled --config wrangler.json",
 		url: "http://127.0.0.1:8788",
 		reuseExistingServer: false,
 		timeout: 180000,
