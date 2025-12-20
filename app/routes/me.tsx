@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, Outlet, useLoaderData, useSearchParams } from "@remix-run/react";
+import { Link, Outlet, useLoaderData, useLocation, useNavigate, useSearchParams } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
@@ -48,6 +48,8 @@ export default function MePage() {
 	const data = useLoaderData<typeof loader>();
 	const me = data.me;
 	const isBanned = Boolean(me.isBanned);
+	const navigate = useNavigate();
+	const location = useLocation();
 	const [searchParams] = useSearchParams();
 	const [navError, setNavError] = useState<string | null>(null);
 	const forcedOnceRef = useRef(false);
@@ -78,7 +80,13 @@ export default function MePage() {
 
 	function openPwdModal(reason?: string) {
 		setNavError(reason ?? null);
-		window.location.href = reason ? "/me/password?force=1" : "/me/password";
+		const target = reason ? "/me/password?force=1" : "/me/password";
+		const [path, rawSearch] = target.split("?");
+		const search = rawSearch ? `?${rawSearch}` : "";
+		if (location.pathname === path && location.search === search) {
+			return;
+		}
+		navigate(target, { replace: true });
 	}
 
 	return (
