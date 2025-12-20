@@ -39,6 +39,15 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		if (message === "EMAIL_NOT_CONFIGURED") {
 			return json<ActionData>({ ok: false, message: "邮件服务未配置" }, { status: 500 });
 		}
+		if (message === "RESEND_API_KEY_INVALID") {
+			return json<ActionData>({ ok: false, message: "RESEND_API_KEY 无效或无权限" }, { status: 500 });
+		}
+		if (message === "RESEND_API_KEY_INVALID_FALLBACK_FAILED") {
+			return json<ActionData>(
+				{ ok: false, message: "RESEND_API_KEY 无效或无权限，且备用邮件服务发送失败" },
+				{ status: 500 },
+			);
+		}
 		if (message === "EMAIL_SEND_FAILED") {
 			return json<ActionData>({ ok: false, message: "邮件发送失败，请重试" }, { status: 500 });
 		}

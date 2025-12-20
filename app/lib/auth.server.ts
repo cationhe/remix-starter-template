@@ -109,14 +109,6 @@ function normalizeUrl(base: string) {
 	return base.replace(/\/$/, "");
 }
 
-async function readResponseText(resp: Response) {
-	try {
-		return await resp.text();
-	} catch {
-		return "";
-	}
-}
-
 async function resendSendEmail(context: AppLoadContext, args: { to: string; subject: string; text: string }) {
 	const apiKey = getEnvString(context, "RESEND_API_KEY");
 	const from = getEnvString(context, "EMAIL_FROM");
@@ -137,8 +129,10 @@ async function resendSendEmail(context: AppLoadContext, args: { to: string; subj
 		}),
 	});
 	if (!resp.ok) {
-		const detail = await readResponseText(resp);
-		throw Object.assign(new Error("EMAIL_SEND_FAILED"), { status: resp.status, detail });
+		if (resp.status === 401 || resp.status === 403) {
+			throw new Error("RESEND_API_KEY_INVALID");
+		}
+		throw new Error("EMAIL_SEND_FAILED");
 	}
 }
 
@@ -175,44 +169,35 @@ async function mailchannelsSendEmail(
 		}),
 	});
 	if (!resp.ok) {
-		const detail = await readResponseText(resp);
-		throw Object.assign(new Error("EMAIL_SEND_FAILED"), { status: resp.status, detail });
+		throw new Error("EMAIL_SEND_FAILED");
 	}
 }
 
 export async function sendEmail(context: AppLoadContext, args: { to: string; subject: string; text: string }) {
 	const providerRaw = getEnvString(context, "EMAIL_PROVIDER").toLowerCase();
+	const provider = providerRaw === "auto" ? "" : providerRaw;
+	const isAuto = !providerRaw || providerRaw === "auto";
 	const hasResendKey = Boolean(getEnvString(context, "RESEND_API_KEY"));
-	const auto = !providerRaw || providerRaw === "auto";
-	const primary = auto ? (hasResendKey ? "resend" : "mailchannels") : providerRaw;
-	const secondary = auto ? (primary === "resend" ? "mailchannels" : "resend") : "";
-
-	const run = async (provider: string) => {
-		if (provider === "mailchannels") {
-			return mailchannelsSendEmail(context, args);
-		}
-		return resendSendEmail(context, args);
-	};
-
-	try {
-		return await run(primary);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : "";
-		if (!secondary || (message !== "EMAIL_SEND_FAILED" && message !== "EMAIL_NOT_CONFIGURED")) {
+	const selected = provider || (hasResendKey ? "resend" : "mailchannels");
+	if (selected === "mailchannels") {
+		return mailchannelsSendEmail(context, args);
+	}
+	if (isAuto) {
+		try {
+			return await resendSendEmail(context, args);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message === "RESEND_API_KEY_INVALID") {
+				try {
+					return await mailchannelsSendEmail(context, args);
+				} catch {
+					throw new Error("RESEND_API_KEY_INVALID_FALLBACK_FAILED");
+				}
+			}
 			throw error;
 		}
-		try {
-			return await run(secondary);
-		} catch (fallbackError) {
-			const detailA = typeof (error as any)?.detail === "string" ? String((error as any).detail) : "";
-			const detailB =
-				typeof (fallbackError as any)?.detail === "string" ? String((fallbackError as any).detail) : "";
-			throw Object.assign(new Error("EMAIL_SEND_FAILED"), {
-				status: (error as any)?.status ?? (fallbackError as any)?.status,
-				detail: [detailA && `primary: ${detailA}`, detailB && `fallback: ${detailB}`].filter(Boolean).join("\n"),
-			});
-		}
 	}
+	return resendSendEmail(context, args);
 }
 
 type AuditEventType =
