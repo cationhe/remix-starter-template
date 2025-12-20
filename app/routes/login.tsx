@@ -17,6 +17,8 @@ type ActionData = {
 		password?: string;
 	};
 	formError?: string;
+	remainingAttempts?: number;
+	lockedUntil?: number;
 };
 
 export async function loader({}: LoaderFunctionArgs) {
@@ -31,28 +33,34 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const normalizedEmail = email.trim().toLowerCase();
 	const now = Date.now();
 
-	const loginIpConfig = { windowMs: 15 * 60 * 1000, max: 20, blockMs: 15 * 60 * 1000 };
-	const loginEmailConfig = { windowMs: 15 * 60 * 1000, max: 8, blockMs: 15 * 60 * 1000 };
+	const lockMs = 5 * 60 * 1000;
+	const loginIpConfig = { windowMs: 30 * 60 * 1000, max: 10, blockMs: lockMs };
+	const loginEmailConfig = { windowMs: 30 * 60 * 1000, max: 5, blockMs: lockMs };
+
+	let blockedUntil: number | null = null;
 
 	if (ip) {
 		const state = await getRateLimitState(context, `login:ip:${ip}`, now);
 		if (state.blockedUntil && state.blockedUntil > now) {
-			const retryAfterSeconds = Math.max(1, Math.ceil((state.blockedUntil - now) / 1000));
-			return json<ActionData>(
-				{ formError: `尝试过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
-				{ status: 429 },
-			);
+			blockedUntil = Math.max(blockedUntil ?? 0, state.blockedUntil);
 		}
 	}
 	if (normalizedEmail) {
 		const state = await getRateLimitState(context, `login:email:${normalizedEmail}`, now);
 		if (state.blockedUntil && state.blockedUntil > now) {
-			const retryAfterSeconds = Math.max(1, Math.ceil((state.blockedUntil - now) / 1000));
-			return json<ActionData>(
-				{ formError: `尝试过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
-				{ status: 429 },
-			);
+			blockedUntil = Math.max(blockedUntil ?? 0, state.blockedUntil);
 		}
+	}
+	if (blockedUntil && blockedUntil > now) {
+		const retryAfterMinutes = Math.max(1, Math.ceil((blockedUntil - now) / (60 * 1000)));
+		return json<ActionData>(
+			{
+				formError: `账号已锁定，请 ${retryAfterMinutes} 分钟后再试`,
+				remainingAttempts: 0,
+				lockedUntil: blockedUntil,
+			},
+			{ status: 429 },
+		);
 	}
 
 	const fieldErrors: ActionData["fieldErrors"] = {};
@@ -67,10 +75,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 	const user = await verifyLogin(context, email, password);
 	if (!user) {
-		let blockedUntil: number | null = null;
+		let remainingAttempts: number | null = null;
+		let nextBlockedUntil: number | null = null;
 		if (ip) {
 			const result = await consumeRateLimit(context, `login:ip:${ip}`, loginIpConfig, now);
-			blockedUntil = result.allowed ? blockedUntil : result.blockedUntil;
+			nextBlockedUntil = result.allowed
+				? nextBlockedUntil
+				: Math.max(nextBlockedUntil ?? 0, result.blockedUntil ?? 0);
+			remainingAttempts = remainingAttempts === null ? result.remaining : Math.min(remainingAttempts, result.remaining);
 		}
 		if (normalizedEmail) {
 			const result = await consumeRateLimit(
@@ -79,18 +91,27 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				loginEmailConfig,
 				now,
 			);
-			blockedUntil = result.allowed ? blockedUntil : result.blockedUntil;
+			nextBlockedUntil = result.allowed
+				? nextBlockedUntil
+				: Math.max(nextBlockedUntil ?? 0, result.blockedUntil ?? 0);
+			remainingAttempts = remainingAttempts === null ? result.remaining : Math.min(remainingAttempts, result.remaining);
 		}
-		if (blockedUntil && blockedUntil > now) {
-			const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - now) / 1000));
+		if (nextBlockedUntil && nextBlockedUntil > now) {
+			const retryAfterMinutes = Math.max(1, Math.ceil((nextBlockedUntil - now) / (60 * 1000)));
 			return json<ActionData>(
-				{ formError: `尝试过于频繁，请在 ${retryAfterSeconds} 秒后再试` },
+				{
+					formError: `账号已锁定，请 ${retryAfterMinutes} 分钟后再试`,
+					remainingAttempts: 0,
+					lockedUntil: nextBlockedUntil,
+				},
 				{ status: 429 },
 			);
 		}
+		const remaining = typeof remainingAttempts === "number" ? remainingAttempts : null;
 		return json<ActionData>(
 			{
 				formError: "邮箱或密码错误",
+				remainingAttempts: remaining ?? undefined,
 			},
 			{ status: 400 },
 		);
@@ -161,7 +182,12 @@ export default function Login() {
 						) : null}
 					</div>
 					{actionData?.formError ? (
-						<p className="text-sm text-red-600">{actionData.formError}</p>
+						<div className="space-y-1">
+							<p className="text-sm text-red-600">{actionData.formError}</p>
+							{typeof actionData.remainingAttempts === "number" ? (
+								<p className="text-sm text-red-600">您还有 {actionData.remainingAttempts} 次尝试机会</p>
+							) : null}
+						</div>
 					) : null}
 					<button
 						type="submit"

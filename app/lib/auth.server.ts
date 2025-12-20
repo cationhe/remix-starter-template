@@ -288,7 +288,12 @@ export async function consumeRateLimit(context: AppLoadContext, key: string, con
 	const db = getDBFromContext(context);
 	const state = await getRateLimitState(context, key, now);
 	if (state.blockedUntil && state.blockedUntil > now) {
-		return { allowed: false, blockedUntil: state.blockedUntil };
+		return {
+			allowed: false,
+			blockedUntil: state.blockedUntil,
+			count: state.count,
+			remaining: 0,
+		};
 	}
 
 	let windowStartedAt = state.windowStartedAt;
@@ -298,7 +303,8 @@ export async function consumeRateLimit(context: AppLoadContext, key: string, con
 		count = 0;
 	}
 	count += 1;
-	const blockedUntil = count > config.max ? now + config.blockMs : null;
+	const blockedUntil = count >= config.max ? now + config.blockMs : null;
+	const remaining = Math.max(0, config.max - count);
 
 	await execute(
 		db,
@@ -307,9 +313,9 @@ export async function consumeRateLimit(context: AppLoadContext, key: string, con
 	);
 
 	if (blockedUntil && blockedUntil > now) {
-		return { allowed: false, blockedUntil };
+		return { allowed: false, blockedUntil, count, remaining };
 	}
-	return { allowed: true, blockedUntil: null };
+	return { allowed: true, blockedUntil: null, count, remaining };
 }
 
 export async function resetRateLimit(context: AppLoadContext, key: string, now = Date.now()) {

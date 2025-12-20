@@ -1,6 +1,7 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, useLoaderData } from "@remix-run/react";
+import { Link, useLoaderData, useNavigate } from "@remix-run/react";
+import { useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
 
@@ -47,6 +48,8 @@ export default function MePage() {
 	const data = useLoaderData<typeof loader>();
 	const me = data.me;
 	const isBanned = Boolean(me.isBanned);
+	const navigate = useNavigate();
+	const [navError, setNavError] = useState<string | null>(null);
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -96,9 +99,24 @@ export default function MePage() {
 
 				<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 					<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">账号信息</h2>
+					{navError ? (
+						<div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+							{navError}
+						</div>
+					) : null}
 					<div className="mt-4 flex flex-wrap items-center gap-2">
 						<Link
 							to="/me/password"
+							onClick={(event) => {
+								event.preventDefault();
+								setNavError(null);
+								try {
+									navigate("/me/password");
+								} catch {
+									setNavError("跳转失败，请刷新页面后重试");
+									window.location.href = "/me/password";
+								}
+							}}
 							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 						>
 							修改密码
