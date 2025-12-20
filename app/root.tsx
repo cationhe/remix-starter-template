@@ -47,7 +47,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 			pathname === "/me/password-code" ||
 			pathname === "/logout";
 		if (!allowed) {
-			throw redirect("/me?pwdVerify=1&forcePwd=1");
+			throw redirect("/me/password?force=1");
 		}
 	}
 	return json<LoaderData>({ user });

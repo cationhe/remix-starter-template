@@ -1,11 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation, useSearchParams } from "@remix-run/react";
-import { changePassword, requireUser } from "~/lib/auth.server";
+import { requireUser, setPasswordByUserId } from "~/lib/auth.server";
 
 type ActionData = {
 	fieldErrors?: {
-		oldPassword?: string;
 		newPassword?: string;
 		confirmNewPassword?: string;
 	};
@@ -34,14 +33,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
 	const formData = await request.formData();
-	const oldPassword = String(formData.get("oldPassword") || "");
 	const newPassword = String(formData.get("newPassword") || "");
 	const confirmNewPassword = String(formData.get("confirmNewPassword") || "");
 
 	const fieldErrors: ActionData["fieldErrors"] = {};
-	if (!oldPassword) {
-		fieldErrors.oldPassword = "请输入旧密码";
-	}
 	if (!newPassword) {
 		fieldErrors.newPassword = "请输入新密码";
 	}
@@ -55,18 +50,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		fieldErrors.confirmNewPassword = "两次输入的新密码不一致";
 	}
 
-	if (fieldErrors.oldPassword || fieldErrors.newPassword || fieldErrors.confirmNewPassword) {
+	if (fieldErrors.newPassword || fieldErrors.confirmNewPassword) {
 		return json<ActionData>({ fieldErrors }, { status: 400 });
 	}
 
 	try {
-		await changePassword(context, me.id, oldPassword, newPassword);
+		await setPasswordByUserId(context, me.id, newPassword);
 		return redirect("/me/password?success=1");
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "";
-		if (message === "OLD_PASSWORD_INCORRECT") {
-			return json<ActionData>({ fieldErrors: { oldPassword: "旧密码不正确" } }, { status: 400 });
-		}
 		return json<ActionData>({ formError: "修改密码失败，请稍后重试" }, { status: 500 });
 	}
 }
@@ -111,20 +102,6 @@ export default function ChangePasswordPage() {
 
 				<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 					<Form method="post" className="space-y-5">
-						<div>
-							<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
-								旧密码
-							</label>
-							<input
-								name="oldPassword"
-								type="password"
-								required
-								className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-							/>
-							{actionData?.fieldErrors?.oldPassword ? (
-								<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.oldPassword}</p>
-							) : null}
-						</div>
 						<div>
 							<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
 								新密码

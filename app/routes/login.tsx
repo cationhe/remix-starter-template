@@ -146,7 +146,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 	const session = await getSession(request, context);
 	session.set("userId", user.id);
-	const next = user.mustChangePassword ? "/me?pwdVerify=1&forcePwd=1" : "/";
+	const next = user.mustChangePassword ? "/me/password?force=1" : "/";
 	return redirect(next, {
 		headers: {
 			"Set-Cookie": await commitSession(session, context),
