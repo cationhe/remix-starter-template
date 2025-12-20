@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, useLoaderData, useNavigate } from "@remix-run/react";
+import { Link, Outlet, useLoaderData, useLocation, useNavigate } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
@@ -48,9 +48,15 @@ export default function MePage() {
 	const data = useLoaderData<typeof loader>();
 	const me = data.me;
 	const isBanned = Boolean(me.isBanned);
+	const location = useLocation();
 	const navigate = useNavigate();
 	const [navError, setNavError] = useState<string | null>(null);
 	const forcedOnceRef = useRef(false);
+	const isChildRoute = location.pathname.startsWith("/me/");
+
+	if (isChildRoute) {
+		return <Outlet />;
+	}
 
 	useEffect(() => {
 		if (forcedOnceRef.current) {
