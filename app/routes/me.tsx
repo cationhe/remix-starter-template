@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, Outlet, useLoaderData, useLocation, useNavigate } from "@remix-run/react";
+import { Link, Outlet, useLoaderData, useNavigate, useSearchParams } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
 import { requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryOne } from "~/lib/d1.server";
@@ -48,15 +48,11 @@ export default function MePage() {
 	const data = useLoaderData<typeof loader>();
 	const me = data.me;
 	const isBanned = Boolean(me.isBanned);
-	const location = useLocation();
+	const [searchParams] = useSearchParams();
 	const navigate = useNavigate();
 	const [navError, setNavError] = useState<string | null>(null);
 	const forcedOnceRef = useRef(false);
-	const isChildRoute = location.pathname.startsWith("/me/");
-
-	if (isChildRoute) {
-		return <Outlet />;
-	}
+	const pwdChanged = searchParams.get("pwdChanged") === "1";
 
 	useEffect(() => {
 		if (forcedOnceRef.current) {
@@ -84,9 +80,9 @@ export default function MePage() {
 	function openPwdModal(reason?: string) {
 		setNavError(reason ?? null);
 		try {
-			navigate("/me/password?force=1");
+			navigate(reason ? "/me/password?force=1" : "/me/password");
 		} catch {
-			window.location.href = "/me/password?force=1";
+			window.location.href = reason ? "/me/password?force=1" : "/me/password";
 		}
 	}
 
@@ -138,18 +134,24 @@ export default function MePage() {
 
 				<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 					<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">账号信息</h2>
+					{pwdChanged ? (
+						<div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200">
+							密码已修改，请使用新密码登录
+						</div>
+					) : null}
 					{navError ? (
 						<div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
 							{navError}
 						</div>
 					) : null}
 					<div className="mt-4 flex flex-wrap items-center gap-2">
-						<Link
-							to="/me/password"
+						<button
+							type="button"
+							onClick={() => openPwdModal()}
 							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 						>
 							修改密码
-						</Link>
+						</button>
 					</div>
 					<dl className="mt-4 grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
 						<div>
@@ -173,6 +175,7 @@ export default function MePage() {
 					</dl>
 				</section>
 			</div>
+			<Outlet />
 		</div>
 	);
 }
