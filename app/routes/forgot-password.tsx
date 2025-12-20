@@ -83,7 +83,34 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				return json<ActionData>({ formError: "邮件服务未配置" }, { status: 500 });
 			}
 			if (message === "EMAIL_SEND_FAILED") {
-				return json<ActionData>({ formError: "邮件发送失败，请稍后重试" }, { status: 500 });
+				const status = typeof (error as any)?.status === "number" ? Number((error as any).status) : 0;
+				const detail = typeof (error as any)?.detail === "string" ? String((error as any).detail) : "";
+				const detailLower = detail.toLowerCase();
+				if (status === 401) {
+					return json<ActionData>({ formError: "RESEND_API_KEY 无效或无权限" }, { status: 500 });
+				}
+				if (status === 403) {
+					return json<ActionData>({ formError: "发件域名未验证或 EMAIL_FROM 不被允许" }, { status: 500 });
+				}
+				if (status === 422) {
+					return json<ActionData>({ formError: "EMAIL_FROM 配置不正确" }, { status: 500 });
+				}
+				if (status === 429) {
+					return json<ActionData>({ formError: "发送过于频繁，请稍后再试" }, { status: 500 });
+				}
+				if (detailLower.includes("invalid api key") || detailLower.includes("unauthorized")) {
+					return json<ActionData>({ formError: "RESEND_API_KEY 无效或无权限" }, { status: 500 });
+				}
+				if (
+					detailLower.includes("domain") &&
+					(detailLower.includes("verify") || detailLower.includes("verified") || detailLower.includes("not allowed"))
+				) {
+					return json<ActionData>({ formError: "发件域名未验证或 EMAIL_FROM 不被允许" }, { status: 500 });
+				}
+				if (detailLower.includes("from") && (detailLower.includes("invalid") || detailLower.includes("missing"))) {
+					return json<ActionData>({ formError: "EMAIL_FROM 配置不正确" }, { status: 500 });
+				}
+				return json<ActionData>({ formError: "邮件发送失败，请检查 Resend 域名验证与发件人配置" }, { status: 500 });
 			}
 			return json<ActionData>({ formError: "邮件发送失败，请稍后重试" }, { status: 500 });
 		}
