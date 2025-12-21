@@ -5,14 +5,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
 import { assertNotBanned, findUserById, requireUser } from "~/lib/auth.server";
-import { getAttachmentStorageUsage, listAttachmentsByPostId, removeAllAttachmentsForPost } from "~/lib/attachments.server";
-import type { AttachmentRecord } from "~/lib/attachments.server";
+import {
+	getAttachmentStorageUsage,
+	listAttachmentsByPostId,
+	listCommentAttachmentsByCommentIds,
+	removeAllAttachmentsForPost,
+	removeAllCommentAttachmentsForPost,
+} from "~/lib/attachments.server";
+import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachments.server";
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 1024,
 	MAX_FILE_SIZE_BYTES: 100 * 1024 * 1024,
 	MAX_ATTACHMENTS_PER_POST: 3,
 	MAX_TOTAL_POST_BYTES: 500 * 1024 * 1024,
+	MAX_ATTACHMENTS_PER_COMMENT: 3,
+	MAX_TOTAL_COMMENT_BYTES: 500 * 1024 * 1024,
 	MULTIPART_THRESHOLD_BYTES: 10 * 1024 * 1024,
 	PART_SIZE_BYTES: 5 * 1024 * 1024,
 } as const;
@@ -30,7 +38,9 @@ type CommentItem = {
 	id: number;
 	content: string;
 	createdAt: number;
+	authorId: number;
 	authorName: string;
+	attachments: CommentAttachmentRecord[];
 };
 
 type LoaderData = {
@@ -122,9 +132,24 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	const comments = await queryAll<CommentItem>(
 		db,
-		"SELECT comments.id as id, comments.content as content, comments.created_at as createdAt, users.display_name as authorName FROM comments JOIN users ON comments.author_id = users.id WHERE comments.post_id = ? ORDER BY comments.created_at ASC LIMIT ? OFFSET ?",
+		"SELECT comments.id as id, comments.content as content, comments.created_at as createdAt, comments.author_id as authorId, users.display_name as authorName FROM comments JOIN users ON comments.author_id = users.id WHERE comments.post_id = ? ORDER BY comments.created_at ASC LIMIT ? OFFSET ?",
 		[id, pageSize, offset],
 	);
+
+	const commentAttachmentRows = await listCommentAttachmentsByCommentIds(
+		context,
+		comments.map((c) => c.id),
+	);
+	const commentAttachmentMap = new Map<number, CommentAttachmentRecord[]>();
+	for (const a of commentAttachmentRows) {
+		const list = commentAttachmentMap.get(a.commentId) || [];
+		list.push(a);
+		commentAttachmentMap.set(a.commentId, list);
+	}
+	const commentsWithAttachments = comments.map((c) => ({
+		...c,
+		attachments: commentAttachmentMap.get(c.id) || [],
+	}));
 
 	const attachments = await listAttachmentsByPostId(context, id);
 	const attachmentStorage = await getAttachmentStorageUsage(context);
@@ -134,7 +159,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		post,
 		attachments,
 		attachmentStorage,
-		comments,
+		comments: commentsWithAttachments,
 		commentCount,
 		likeCount,
 		likedByMe,
@@ -172,6 +197,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		try {
 			await removeAllAttachmentsForPost(context, postId);
+			await removeAllCommentAttachmentsForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
@@ -418,6 +444,199 @@ export default function PostDetailPage() {
 		} catch (e) {
 			setGlobalError(e instanceof Error ? e.message : "获取下载链接失败");
 		}
+	}
+
+	async function requestCommentDownload(commentAttachmentId: number) {
+		setGlobalError(null);
+		try {
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`/api/comment-attachments/${commentAttachmentId}/token`,
+				{ method: "GET" },
+				{ timeoutMs: 15_000, retries: 3 },
+			);
+			if (!res.ok || !data?.ok) {
+				throw new Error(String(data?.error || "获取下载链接失败"));
+			}
+			const token = String(data.token || "");
+			window.location.href = `/comment-attachments/${commentAttachmentId}?token=${encodeURIComponent(token)}`;
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "获取下载链接失败");
+		}
+	}
+
+	type CommentUploadState = {
+		selectedFiles: File[];
+		queue: UploadItem[];
+		busy: boolean;
+		error: string | null;
+	};
+
+	const [commentUploads, setCommentUploads] = useState<Record<number, CommentUploadState>>({});
+
+	function updateCommentUploads(commentId: number, updater: (current: CommentUploadState) => CommentUploadState) {
+		setCommentUploads((prev) => {
+			const current = prev[commentId] || { selectedFiles: [], queue: [], busy: false, error: null };
+			return { ...prev, [commentId]: updater(current) };
+		});
+	}
+
+	async function initiateCommentUpload(commentId: number, file: File) {
+		const { res, data } = await fetchJsonWithRetry<any>(
+			`/api/comments/${commentId}/attachments/initiate`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ filename: file.name, mimeType: file.type, sizeBytes: file.size }),
+			},
+			{ timeoutMs: 15_000, retries: 3 },
+		);
+		if (!res.ok || !data?.ok) {
+			throw new Error(String(data?.error || "创建上传任务失败"));
+		}
+		return data as {
+			uploadRecordId: number;
+			mode: "single" | "multipart";
+			uploadId: string;
+			partSizeBytes: number | null;
+		};
+	}
+
+	async function listAlreadyUploadedCommentParts(uploadRecordId: number) {
+		const { res, data } = await fetchJsonWithRetry<any>(
+			`/api/comment-attachment-uploads/${uploadRecordId}/parts`,
+			{ method: "GET" },
+			{ timeoutMs: 15_000, retries: 3 },
+		);
+		if (!res.ok || !data?.ok || !Array.isArray(data?.parts)) {
+			return new Set<number>();
+		}
+		return new Set<number>(data.parts.map((p: any) => Number(p)).filter((n: any) => Number.isFinite(n) && n > 0));
+	}
+
+	async function uploadCommentSingle(uploadRecordId: number, file: File) {
+		const form = new FormData();
+		form.append("file", file);
+		const { res, data } = await fetchJsonWithRetry<any>(
+			`/api/comment-attachment-uploads/${uploadRecordId}/upload`,
+			{ method: "POST", body: form },
+			{ timeoutMs: 300_000, retries: 3 },
+		);
+		if (!res.ok || !data?.ok) {
+			throw new Error(String(data?.error || "上传失败"));
+		}
+	}
+
+	async function uploadCommentMultipart(uploadRecordId: number, file: File, partSizeBytes: number, onProgress: (p: number) => void) {
+		const totalParts = Math.ceil(file.size / partSizeBytes);
+		const already = await listAlreadyUploadedCommentParts(uploadRecordId);
+		let completed = 0;
+		for (let i = 1; i <= totalParts; i++) {
+			if (already.has(i)) completed++;
+		}
+		onProgress(totalParts > 0 ? completed / totalParts : 0);
+		for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+			if (already.has(partNumber)) continue;
+			const start = (partNumber - 1) * partSizeBytes;
+			const end = Math.min(file.size, partNumber * partSizeBytes);
+			const chunk = file.slice(start, end);
+			const body = await chunk.arrayBuffer();
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`/api/comment-attachment-uploads/${uploadRecordId}/parts/${partNumber}`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/octet-stream" },
+					body,
+				},
+				{ timeoutMs: 300_000, retries: 3 },
+			);
+			if (!res.ok || !data?.ok) {
+				throw new Error(String(data?.error || "上传分块失败"));
+			}
+			completed++;
+			onProgress(totalParts > 0 ? completed / totalParts : 0);
+		}
+		const { res: doneRes, data: done } = await fetchJsonWithRetry<any>(
+			`/api/comment-attachment-uploads/${uploadRecordId}/complete`,
+			{ method: "POST" },
+			{ timeoutMs: 15_000, retries: 3 },
+		);
+		if (!doneRes.ok || !done?.ok) {
+			throw new Error(String(done?.error || "完成上传失败"));
+		}
+	}
+
+	async function startCommentUpload(commentId: number, existingAttachments: CommentAttachmentRecord[]) {
+		const current = commentUploads[commentId] || { selectedFiles: [], queue: [], busy: false, error: null };
+		if (current.busy) return;
+		const uploadingCount = current.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
+		const remainingSlots = Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT - existingAttachments.length - uploadingCount);
+		if (remainingSlots <= 0) {
+			updateCommentUploads(commentId, (c) => ({ ...c, error: "该评论附件数量已达上限" }));
+			return;
+		}
+		if (current.selectedFiles.length === 0) {
+			updateCommentUploads(commentId, (c) => ({ ...c, error: "请选择要上传的文件" }));
+			return;
+		}
+		const existingBytes = existingAttachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
+		const uploadingBytes = current.queue
+			.filter((q) => q.status === "pending" || q.status === "uploading")
+			.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
+		const files = current.selectedFiles.slice(0, remainingSlots);
+		const selectedBytes = files.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
+		if (existingBytes + uploadingBytes + selectedBytes > attachmentLimits.MAX_TOTAL_COMMENT_BYTES) {
+			updateCommentUploads(commentId, (c) => ({ ...c, error: "已超出单条评论附件总大小上限（500MB）" }));
+			return;
+		}
+
+		const items: UploadItem[] = files.map((file) => ({
+			id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+			file,
+			status: "pending",
+			progress: 0,
+			error: null,
+		}));
+		updateCommentUploads(commentId, (c) => ({ ...c, queue: items, busy: true, error: null }));
+		for (const item of items) {
+			updateCommentUploads(commentId, (c) => ({
+				...c,
+				queue: c.queue.map((q) => (q.id === item.id ? { ...q, status: "uploading", progress: 0, error: null } : q)),
+			}));
+			try {
+				const localError = validateLocal(item.file);
+				if (localError) {
+					throw new Error(localError);
+				}
+				const init = await initiateCommentUpload(commentId, item.file);
+				if (init.mode === "single") {
+					await uploadCommentSingle(init.uploadRecordId, item.file);
+					updateCommentUploads(commentId, (c) => ({
+						...c,
+						queue: c.queue.map((q) => (q.id === item.id ? { ...q, progress: 1 } : q)),
+					}));
+				} else {
+					const partSize = init.partSizeBytes || attachmentLimits.PART_SIZE_BYTES;
+					await uploadCommentMultipart(init.uploadRecordId, item.file, partSize, (p) => {
+						updateCommentUploads(commentId, (c) => ({
+							...c,
+							queue: c.queue.map((q) => (q.id === item.id ? { ...q, progress: p } : q)),
+						}));
+					});
+				}
+				updateCommentUploads(commentId, (c) => ({
+					...c,
+					queue: c.queue.map((q) => (q.id === item.id ? { ...q, status: "done", progress: 1 } : q)),
+				}));
+			} catch (e) {
+				const message = e instanceof Error ? e.message : "上传失败";
+				updateCommentUploads(commentId, (c) => ({
+					...c,
+					queue: c.queue.map((q) => (q.id === item.id ? { ...q, status: "error", error: message } : q)),
+				}));
+			}
+		}
+		updateCommentUploads(commentId, (c) => ({ ...c, busy: false, selectedFiles: [] }));
+		window.location.reload();
 	}
 
 	async function initiateUpload(postId: number, file: File) {
@@ -927,6 +1146,120 @@ export default function PostDetailPage() {
 										<p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
 											<span>作者：{comment.authorName}</span>
 										</p>
+										{comment.attachments.length === 0 ? null : (
+											<ul className="mt-3 space-y-2">
+												{comment.attachments.map((a) => (
+													<li
+														key={a.id}
+														className="flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs dark:border-gray-700"
+													>
+														<div className="min-w-0">
+															<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
+															<div className="text-[11px] text-gray-500 dark:text-gray-400">
+																{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
+															</div>
+														</div>
+														{data.user ? (
+															<button
+																type="button"
+																onClick={() => requestCommentDownload(a.id)}
+																disabled={isBanned}
+																className={
+																	isBanned
+																		? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+																	: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+																}
+															>
+																下载
+															</button>
+														) : (
+															<a
+																href="/login"
+																className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+															>
+																登录后下载
+															</a>
+														)}
+													</li>
+												))}
+											</ul>
+										)}
+
+										{data.user && data.user.id === comment.authorId && !isBanned ? (
+											<div className="mt-3 rounded border border-gray-200 p-3 dark:border-gray-700">
+												<div className="flex items-center justify-between gap-3">
+													<div className="min-w-0">
+														<div className="text-sm font-medium text-gray-900 dark:text-gray-100">上传评论附件</div>
+														<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+															剩余可上传：
+															{Math.max(
+																0,
+																attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT -
+																	comment.attachments.length -
+																	(commentUploads[comment.id]?.queue.filter((q) => q.status === "pending" || q.status === "uploading")
+																		.length || 0),
+															)}
+															个；单条评论总大小上限 500MB
+														</div>
+													</div>
+													<button
+														type="button"
+														onClick={() => startCommentUpload(comment.id, comment.attachments)}
+														disabled={Boolean(commentUploads[comment.id]?.busy)}
+														className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+													>
+														{commentUploads[comment.id]?.busy ? "上传中..." : "开始上传"}
+													</button>
+												</div>
+												<div className="mt-2 flex items-center justify-between gap-3">
+													<input
+														type="file"
+														multiple
+														disabled={Boolean(commentUploads[comment.id]?.busy)}
+														onChange={(e) => {
+															const files = Array.from(e.target.files || []);
+															updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
+															e.currentTarget.value = "";
+														}}
+														className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
+													/>
+												</div>
+												{commentUploads[comment.id]?.error ? (
+													<div className="mt-2 text-xs text-red-600 dark:text-red-300">{commentUploads[comment.id]?.error}</div>
+												) : null}
+												{commentUploads[comment.id]?.queue?.length ? (
+													<ul className="mt-2 space-y-2">
+														{commentUploads[comment.id].queue.map((q) => (
+															<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-xs dark:bg-gray-900/30">
+																<div className="flex items-center justify-between gap-3">
+																	<span className="min-w-0 truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
+																	<span className="shrink-0 text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
+																</div>
+																<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
+																	<div
+																		className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
+																		style={{ width: `${Math.round(q.progress * 100)}%` }}
+																	/>
+																</div>
+																<div className="mt-1 flex items-center justify-between text-[11px]">
+																	<span className="text-gray-600 dark:text-gray-300">
+																		{q.status === "pending"
+																			? "等待上传"
+																			: q.status === "uploading"
+																				? "上传中"
+																				: q.status === "done"
+																					? "已完成"
+																					: "失败"}
+																	</span>
+																	<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
+																</div>
+																{q.error ? <div className="mt-1 text-xs text-red-600 dark:text-red-300">{q.error}</div> : null}
+															</li>
+														))}
+													</ul>
+												) : null}
+											</div>
+										) : null}
 									</li>
 								))}
 							</ul>
