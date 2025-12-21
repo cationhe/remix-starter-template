@@ -322,9 +322,46 @@ export async function createCommentUploadRecord(args: {
 	await cleanupExpiredCommentUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
 	const existing = await countCommentAttachmentsForComment(args.context, args.commentId);
-	const active = await countActiveCommentUploadsForComment(args.context, args.commentId, now);
+	let active = await countActiveCommentUploadsForComment(args.context, args.commentId, now);
 	if (existing + active >= MAX_ATTACHMENTS_PER_COMMENT) {
-		throw new Response("每条评论最多上传 3 个附件", { status: 400 });
+		if (existing < MAX_ATTACHMENTS_PER_COMMENT && active > 0) {
+			const db = getDBFromContext(args.context);
+			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
+				db,
+				"SELECT id as id, r2_key as r2Key, upload_id as uploadId FROM comment_attachment_uploads WHERE comment_id = ? AND uploader_id = ? AND expires_at > ?",
+				[args.commentId, args.uploaderId, now],
+			);
+			let bucket: R2Bucket | null = null;
+			try {
+				bucket = getAttachmentsBucket(args.context);
+			} catch {
+				bucket = null;
+			}
+			for (const row of rows) {
+				try {
+					if (bucket && row.uploadId && row.uploadId !== "single") {
+						const upload = bucket.resumeMultipartUpload(row.r2Key, row.uploadId);
+						await upload.abort();
+					}
+				} catch {
+				}
+				try {
+					if (bucket) {
+						await bucket.delete(row.r2Key);
+					}
+				} catch {
+				}
+				try {
+					await execute(db, "DELETE FROM comment_attachment_upload_parts WHERE upload_record_id = ?", [row.id]);
+					await execute(db, "DELETE FROM comment_attachment_uploads WHERE id = ?", [row.id]);
+				} catch {
+				}
+			}
+			active = await countActiveCommentUploadsForComment(args.context, args.commentId, now);
+		}
+		if (existing + active >= MAX_ATTACHMENTS_PER_COMMENT) {
+			throw new Response("每条评论最多上传 3 个附件", { status: 400 });
+		}
 	}
 	const db = getDBFromContext(args.context);
 	const usedRow = await queryOne<{ sum: number | string | null }>(
@@ -510,9 +547,46 @@ export async function createUploadRecord(args: {
 	await cleanupExpiredUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
 	const existing = await countAttachmentsForPost(args.context, args.postId);
-	const active = await countActiveUploadsForPost(args.context, args.postId, now);
+	let active = await countActiveUploadsForPost(args.context, args.postId, now);
 	if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
-		throw new Response("每个帖子最多上传 3 个附件", { status: 400 });
+		if (existing < MAX_ATTACHMENTS_PER_POST && active > 0) {
+			const db = getDBFromContext(args.context);
+			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
+				db,
+				"SELECT id as id, r2_key as r2Key, upload_id as uploadId FROM attachment_uploads WHERE post_id = ? AND uploader_id = ? AND expires_at > ?",
+				[args.postId, args.uploaderId, now],
+			);
+			let bucket: R2Bucket | null = null;
+			try {
+				bucket = getAttachmentsBucket(args.context);
+			} catch {
+				bucket = null;
+			}
+			for (const row of rows) {
+				try {
+					if (bucket && row.uploadId && row.uploadId !== "single") {
+						const upload = bucket.resumeMultipartUpload(row.r2Key, row.uploadId);
+						await upload.abort();
+					}
+				} catch {
+				}
+				try {
+					if (bucket) {
+						await bucket.delete(row.r2Key);
+					}
+				} catch {
+				}
+				try {
+					await execute(db, "DELETE FROM attachment_upload_parts WHERE upload_record_id = ?", [row.id]);
+					await execute(db, "DELETE FROM attachment_uploads WHERE id = ?", [row.id]);
+				} catch {
+				}
+			}
+			active = await countActiveUploadsForPost(args.context, args.postId, now);
+		}
+		if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
+			throw new Response("每个帖子最多上传 3 个附件", { status: 400 });
+		}
 	}
 	const db = getDBFromContext(args.context);
 	const usedRow = await queryOne<{ sum: number | string | null }>(

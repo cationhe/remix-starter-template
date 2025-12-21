@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
 	finalizeUploadToCommentAttachment,
 	getAttachmentsBucket,
@@ -83,6 +84,18 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		await finalizeUploadToCommentAttachment({ context, uploadRecordId });
 		return json<ActionData>({ ok: true });
 	} catch (error) {
+		try {
+			const bucket = getAttachmentsBucket(context);
+			await bucket.delete(record.r2Key);
+		} catch {
+		}
+		try {
+			const db = getDBFromContext(context);
+			await execute(db, "DELETE FROM comment_attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
+			await execute(db, "DELETE FROM comment_attachment_uploads WHERE id = ?", [record.id]);
+			await execute(db, "DELETE FROM comment_attachments WHERE r2_key = ?", [record.r2Key]);
+		} catch {
+		}
 		const message = error instanceof Error ? error.message : "";
 		if (message.includes("病毒扫描")) {
 			return json<ActionData>({ ok: false, error: "病毒扫描未通过" }, { status: 400 });
@@ -93,4 +106,3 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "上传失败，请稍后重试" }, { status: 500 });
 	}
 }
-

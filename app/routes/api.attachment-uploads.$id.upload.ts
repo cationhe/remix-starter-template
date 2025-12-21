@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
 	finalizeUploadToAttachment,
 	getAttachmentsBucket,
@@ -80,10 +81,21 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		await finalizeUploadToAttachment({ context, uploadRecordId });
 		return json<ActionData>({ ok: true });
 	} catch (error) {
+		try {
+			const bucket = getAttachmentsBucket(context);
+			await bucket.delete(record.r2Key);
+		} catch {
+		}
+		try {
+			const db = getDBFromContext(context);
+			await execute(db, "DELETE FROM attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
+			await execute(db, "DELETE FROM attachment_uploads WHERE id = ?", [record.id]);
+			await execute(db, "DELETE FROM attachments WHERE r2_key = ?", [record.r2Key]);
+		} catch {
+		}
 		if (error instanceof Response) {
 			return json<ActionData>({ ok: false, error: await error.text() }, { status: error.status });
 		}
 		return json<ActionData>({ ok: false, error: "上传失败，请稍后重试" }, { status: 500 });
 	}
 }
-

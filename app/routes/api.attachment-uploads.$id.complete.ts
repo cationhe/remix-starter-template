@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
 	attachmentLimits,
 	finalizeUploadToAttachment,
@@ -67,7 +68,22 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		const bucket = getAttachmentsBucket(context);
 		const upload = bucket.resumeMultipartUpload(record.r2Key, record.uploadId);
 		await upload.complete(parts.map((p) => ({ partNumber: p.partNumber, etag: p.etag })));
-		await finalizeUploadToAttachment({ context, uploadRecordId });
+		try {
+			await finalizeUploadToAttachment({ context, uploadRecordId });
+		} catch (finalizeError) {
+			try {
+				await bucket.delete(record.r2Key);
+			} catch {
+			}
+			try {
+				const db = getDBFromContext(context);
+				await execute(db, "DELETE FROM attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
+				await execute(db, "DELETE FROM attachment_uploads WHERE id = ?", [record.id]);
+				await execute(db, "DELETE FROM attachments WHERE r2_key = ?", [record.r2Key]);
+			} catch {
+			}
+			throw finalizeError;
+		}
 		return json<ActionData>({ ok: true });
 	} catch (error) {
 		if (error instanceof Response) {
@@ -76,4 +92,3 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "完成上传失败" }, { status: 500 });
 	}
 }
-
