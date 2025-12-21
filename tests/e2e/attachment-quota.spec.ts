@@ -3,6 +3,8 @@ import { test, expect } from "@playwright/test";
 test("站点附件总存储超过 9GB 时：作者侧上传入口禁用并提示", async ({ page }) => {
 	test.setTimeout(180000);
 	page.setDefaultNavigationTimeout(120000);
+	const seedRes = await page.request.post("/e2e/seed-quota");
+	expect(seedRes.ok()).toBeTruthy();
 	const fakeIp = `10.12.${Math.floor(Math.random() * 200) + 1}.${Math.floor(Math.random() * 200) + 1}`;
 	await page.setExtraHTTPHeaders({
 		"CF-Connecting-IP": fakeIp,
@@ -31,6 +33,7 @@ test("站点附件总存储超过 9GB 时：作者侧上传入口禁用并提示
 	await expect(page).toHaveURL(/\/posts\//);
 
 	await expect(page.getByText("网站总存储量已超过 9GB，已暂停附件上传")).toBeVisible();
+	await expect(page.getByRole("button", { name: /上传\s*附件/ })).toBeDisabled();
 	await expect(page.locator('input[type="file"]')).toBeDisabled();
 	await expect(page.getByRole("button", { name: "开始上传" })).toBeDisabled();
 });

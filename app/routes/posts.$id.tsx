@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
 import { assertNotBanned, findUserById, requireUser } from "~/lib/auth.server";
@@ -12,6 +12,7 @@ const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 1024,
 	MAX_FILE_SIZE_BYTES: 100 * 1024 * 1024,
 	MAX_ATTACHMENTS_PER_POST: 3,
+	MAX_TOTAL_POST_BYTES: 500 * 1024 * 1024,
 	MULTIPART_THRESHOLD_BYTES: 10 * 1024 * 1024,
 	PART_SIZE_BYTES: 5 * 1024 * 1024,
 } as const;
@@ -260,12 +261,43 @@ export default function PostDetailPage() {
 	const [queue, setQueue] = useState<UploadItem[]>([]);
 	const [busy, setBusy] = useState(false);
 	const [globalError, setGlobalError] = useState<string | null>(null);
+	const [isDragging, setIsDragging] = useState(false);
+	const fileInputRef = useRef<HTMLInputElement | null>(null);
 
 	const remainingSlots = useMemo(() => {
 		const existing = data.attachments.length;
 		const uploading = queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
 		return Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_POST - existing - uploading);
 	}, [data.attachments.length, queue]);
+
+	const existingBytes = useMemo(() => {
+		return data.attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
+	}, [data.attachments]);
+
+	const uploadingBytes = useMemo(() => {
+		return queue
+			.filter((q) => q.status === "pending" || q.status === "uploading")
+			.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
+	}, [queue]);
+
+	const effectiveSelectedFiles = useMemo(() => {
+		return selectedFiles.slice(0, remainingSlots);
+	}, [remainingSlots, selectedFiles]);
+
+	type SelectionSizeState = {
+		selectedBytes: number;
+		remainingBytes: number;
+		overLimit: boolean;
+	};
+
+	const selectionSize = useMemo<SelectionSizeState>(() => {
+		const selectedBytes = effectiveSelectedFiles.reduce(
+			(sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0),
+			0,
+		);
+		const remainingBytes = Math.max(0, attachmentLimits.MAX_TOTAL_POST_BYTES - existingBytes - uploadingBytes);
+		return { selectedBytes, remainingBytes, overLimit: selectedBytes > remainingBytes };
+	}, [effectiveSelectedFiles, existingBytes, uploadingBytes]);
 
 	function formatSize(bytes: number) {
 		if (!Number.isFinite(bytes) || bytes < 0) return "-";
@@ -319,6 +351,50 @@ export default function PostDetailPage() {
 		return null;
 	}
 
+	function isLikelyNetworkError(error: unknown) {
+		if (!error) return false;
+		if (error instanceof DOMException && error.name === "AbortError") return false;
+		return error instanceof TypeError;
+	}
+
+	async function fetchWithRetry(
+		input: RequestInfo | URL,
+		init: RequestInit,
+		options: { timeoutMs: number; retries: number },
+	) {
+		let lastError: unknown = null;
+		for (let attempt = 1; attempt <= options.retries; attempt++) {
+			const controller = new AbortController();
+			const id = setTimeout(() => controller.abort(), options.timeoutMs);
+			try {
+				const res = await fetch(input, { ...init, signal: controller.signal });
+				clearTimeout(id);
+				return res;
+			} catch (e) {
+				clearTimeout(id);
+				lastError = e;
+				if (!isLikelyNetworkError(e) || attempt >= options.retries) break;
+				await new Promise((r) => setTimeout(r, attempt * 300));
+			}
+		}
+		throw lastError instanceof Error ? lastError : new Error("网络错误");
+	}
+
+	async function fetchJsonWithRetry<T>(
+		input: RequestInfo | URL,
+		init: RequestInit,
+		options: { timeoutMs: number; retries: number },
+	) {
+		const res = await fetchWithRetry(input, init, options);
+		let data: any = null;
+		try {
+			data = await res.json();
+		} catch {
+			data = null;
+		}
+		return { res, data: data as T };
+	}
+
 	useEffect(() => {
 		setSelectedFiles([]);
 		setQueue([]);
@@ -329,12 +405,15 @@ export default function PostDetailPage() {
 	async function requestDownload(attachmentId: number) {
 		setGlobalError(null);
 		try {
-			const res = await fetch(`/api/attachments/${attachmentId}/token`, { method: "GET" });
-			const body = (await res.json()) as any;
-			if (!res.ok || !body?.ok) {
-				throw new Error(String(body?.error || "获取下载链接失败"));
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`/api/attachments/${attachmentId}/token`,
+				{ method: "GET" },
+				{ timeoutMs: 15_000, retries: 3 },
+			);
+			if (!res.ok || !data?.ok) {
+				throw new Error(String(data?.error || "获取下载链接失败"));
 			}
-			const token = String(body.token || "");
+			const token = String(data.token || "");
 			window.location.href = `/attachments/${attachmentId}?token=${encodeURIComponent(token)}`;
 		} catch (e) {
 			setGlobalError(e instanceof Error ? e.message : "获取下载链接失败");
@@ -342,16 +421,19 @@ export default function PostDetailPage() {
 	}
 
 	async function initiateUpload(postId: number, file: File) {
-		const res = await fetch(`/api/posts/${postId}/attachments/initiate`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ filename: file.name, mimeType: file.type, sizeBytes: file.size }),
-		});
-		const body = (await res.json()) as any;
-		if (!res.ok || !body?.ok) {
-			throw new Error(String(body?.error || "创建上传任务失败"));
+		const { res, data } = await fetchJsonWithRetry<any>(
+			`/api/posts/${postId}/attachments/initiate`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ filename: file.name, mimeType: file.type, sizeBytes: file.size }),
+			},
+			{ timeoutMs: 15_000, retries: 3 },
+		);
+		if (!res.ok || !data?.ok) {
+			throw new Error(String(data?.error || "创建上传任务失败"));
 		}
-		return body as {
+		return data as {
 			uploadRecordId: number;
 			mode: "single" | "multipart";
 			uploadId: string;
@@ -359,36 +441,67 @@ export default function PostDetailPage() {
 		};
 	}
 
+	async function listAlreadyUploadedParts(uploadRecordId: number) {
+		const { res, data } = await fetchJsonWithRetry<any>(
+			`/api/attachment-uploads/${uploadRecordId}/parts`,
+			{ method: "GET" },
+			{ timeoutMs: 15_000, retries: 3 },
+		);
+		if (!res.ok || !data?.ok || !Array.isArray(data?.parts)) {
+			return new Set<number>();
+		}
+		return new Set<number>(data.parts.map((p: any) => Number(p)).filter((n: any) => Number.isFinite(n) && n > 0));
+	}
+
 	async function uploadSingle(uploadRecordId: number, file: File) {
 		const form = new FormData();
 		form.append("file", file);
-		const res = await fetch(`/api/attachment-uploads/${uploadRecordId}/upload`, { method: "POST", body: form });
-		const body = (await res.json()) as any;
-		if (!res.ok || !body?.ok) {
-			throw new Error(String(body?.error || "上传失败"));
+		const { res, data } = await fetchJsonWithRetry<any>(
+			`/api/attachment-uploads/${uploadRecordId}/upload`,
+			{ method: "POST", body: form },
+			{ timeoutMs: 300_000, retries: 3 },
+		);
+		if (!res.ok || !data?.ok) {
+			throw new Error(String(data?.error || "上传失败"));
 		}
 	}
 
 	async function uploadMultipart(uploadRecordId: number, file: File, partSizeBytes: number, onProgress: (p: number) => void) {
 		const totalParts = Math.ceil(file.size / partSizeBytes);
+		const already = await listAlreadyUploadedParts(uploadRecordId);
+		let completed = 0;
+		for (let i = 1; i <= totalParts; i++) {
+			if (already.has(i)) completed++;
+		}
+		onProgress(totalParts > 0 ? completed / totalParts : 0);
 		for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+			if (already.has(partNumber)) {
+				continue;
+			}
 			const start = (partNumber - 1) * partSizeBytes;
 			const end = Math.min(file.size, partNumber * partSizeBytes);
 			const chunk = file.slice(start, end);
 			const body = await chunk.arrayBuffer();
-			const res = await fetch(`/api/attachment-uploads/${uploadRecordId}/parts/${partNumber}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/octet-stream" },
-				body,
-			});
-			const data = (await res.json()) as any;
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`/api/attachment-uploads/${uploadRecordId}/parts/${partNumber}`,
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/octet-stream" },
+					body,
+				},
+				{ timeoutMs: 300_000, retries: 3 },
+			);
 			if (!res.ok || !data?.ok) {
 				throw new Error(String(data?.error || "上传分块失败"));
 			}
-			onProgress(partNumber / totalParts);
+			completed++;
+			onProgress(totalParts > 0 ? completed / totalParts : 0);
 		}
-		const doneRes = await fetch(`/api/attachment-uploads/${uploadRecordId}/complete`, { method: "POST" });
-		const done = (await doneRes.json()) as any;
+		const { res: doneRes, data: done } = await fetchJsonWithRetry<any>(
+			`/api/attachment-uploads/${uploadRecordId}/complete`,
+			{ method: "POST" },
+			{ timeoutMs: 15_000, retries: 3 },
+		);
 		if (!doneRes.ok || !done?.ok) {
 			throw new Error(String(done?.error || "完成上传失败"));
 		}
@@ -406,11 +519,15 @@ export default function PostDetailPage() {
 			setGlobalError("请选择要上传的文件");
 			return;
 		}
+		if (selectionSize.overLimit) {
+			setGlobalError("已超出单帖附件总大小上限（500MB）");
+			return;
+		}
 		if (remainingSlots <= 0) {
 			setGlobalError("该帖子附件数量已达上限");
 			return;
 		}
-		const files = selectedFiles.slice(0, remainingSlots);
+		const files = effectiveSelectedFiles;
 		const items: UploadItem[] = files.map((file) => ({
 			id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
 			file,
@@ -608,45 +725,142 @@ export default function PostDetailPage() {
 							</ul>
 						)}
 
-						{canManageAttachments ? (
-							<div className="mt-6 rounded border border-gray-200 p-4 dark:border-gray-700">
-								<div className="flex flex-col gap-3">
-									<div className="flex items-center justify-between">
+					{canManageAttachments ? (
+						<div className="mt-6 rounded border border-gray-200 p-4 dark:border-gray-700">
+							<div className="flex flex-col gap-3">
+								<div className="flex items-center justify-between gap-3">
+									<div className="min-w-0">
 										<label className="text-sm font-medium text-gray-900 dark:text-gray-100">
 											上传附件
 										</label>
-										<span className="text-xs text-gray-500 dark:text-gray-400">
-											剩余可上传：{remainingSlots} 个
-										</span>
-									</div>
-									{uploadsPaused ? (
-										<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
-											网站总存储量已超过 9GB，已暂停附件上传
+										<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+											<span>剩余可上传：{remainingSlots} 个</span>
+											<span>
+												已选 {formatSize(selectionSize.selectedBytes)} / 剩余 {formatSize(selectionSize.remainingBytes)}
+											</span>
+											{selectedFiles.length > remainingSlots ? (
+												<span className="text-amber-700 dark:text-amber-300">
+													已选择 {selectedFiles.length} 个，仅上传前 {remainingSlots} 个
+												</span>
+											) : null}
+											{selectionSize.overLimit ? (
+												<span className="text-red-600 dark:text-red-300">已超出 500MB 上限</span>
+											) : null}
 										</div>
-									) : null}
-					<input
-						type="file"
-						multiple
-						disabled={busy || remainingSlots <= 0 || uploadsPaused}
-						onChange={(e) => {
-							const files = Array.from(e.target.files || []);
-							setSelectedFiles(files);
-						}}
-						className="block w-full text-sm text-gray-700 file:mr-4 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-900 dark:file:text-gray-100 dark:hover:file:bg-gray-800"
-					/>
-									<div className="flex items-center justify-between">
-										<span className="text-xs text-gray-500 dark:text-gray-400">
-											每帖最多 {attachmentLimits.MAX_ATTACHMENTS_PER_POST} 个附件，大文件将自动分块上传
-										</span>
-										<button
-											type="button"
-											onClick={startUpload}
-											disabled={busy || selectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused}
-											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-										>
-											{busy ? "上传中..." : "开始上传"}
-										</button>
 									</div>
+									<button
+										type="button"
+										onClick={() => fileInputRef.current?.click()}
+										disabled={busy || remainingSlots <= 0 || uploadsPaused}
+										className={
+											busy || remainingSlots <= 0 || uploadsPaused
+												? "h-9 w-12 cursor-not-allowed rounded bg-gray-300 text-[10px] font-semibold text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+												: "h-9 w-12 rounded bg-gradient-to-r from-blue-600 to-cyan-500 text-[10px] font-semibold text-white shadow hover:from-blue-700 hover:to-cyan-600"
+										}
+									>
+										<span className="block leading-3">
+											上传
+											<br />
+											附件
+										</span>
+									</button>
+								</div>
+								{uploadsPaused ? (
+									<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+										网站总存储量已超过 9GB，已暂停附件上传
+									</div>
+								) : null}
+							<input
+								ref={fileInputRef}
+								type="file"
+								multiple
+								disabled={busy || remainingSlots <= 0 || uploadsPaused}
+								onChange={(e) => {
+									const files = Array.from(e.target.files || []);
+									setSelectedFiles(files);
+									e.currentTarget.value = "";
+								}}
+								className="hidden"
+							/>
+							<div
+								onDragEnter={(e) => {
+									e.preventDefault();
+								if (busy || remainingSlots <= 0 || uploadsPaused) return;
+								setIsDragging(true);
+							}}
+								onDragOver={(e) => {
+									e.preventDefault();
+								if (busy || remainingSlots <= 0 || uploadsPaused) return;
+								setIsDragging(true);
+							}}
+								onDragLeave={(e) => {
+									e.preventDefault();
+								setIsDragging(false);
+							}}
+								onDrop={(e) => {
+									e.preventDefault();
+								setIsDragging(false);
+								if (busy || remainingSlots <= 0 || uploadsPaused) return;
+								const files = Array.from(e.dataTransfer.files || []);
+								setSelectedFiles(files);
+							}}
+							className={
+								busy || remainingSlots <= 0 || uploadsPaused
+									? "rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-500"
+									: isDragging
+										? "cursor-pointer rounded-lg border border-dashed border-blue-400 bg-blue-50 p-4 text-sm text-blue-700 dark:border-blue-600 dark:bg-blue-900/20 dark:text-blue-200"
+										: "cursor-pointer rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 hover:border-blue-400 hover:bg-blue-50 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-200 dark:hover:border-blue-600 dark:hover:bg-blue-900/20"
+							}
+							onClick={() => {
+								if (busy || remainingSlots <= 0 || uploadsPaused) return;
+								fileInputRef.current?.click();
+							}}
+							role="button"
+							tabIndex={0}
+							onKeyDown={(e) => {
+								if (e.key !== "Enter" && e.key !== " ") return;
+								e.preventDefault();
+								if (busy || remainingSlots <= 0 || uploadsPaused) return;
+								fileInputRef.current?.click();
+							}}
+						>
+							<div className="flex items-start justify-between gap-3">
+								<div className="min-w-0">
+									<div className="font-medium">
+										拖拽文件到此处，或点击选择文件
+									</div>
+									<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+										单帖总大小上限 500MB；大文件将自动分块上传
+									</div>
+								</div>
+								<div className="text-xs text-gray-500 dark:text-gray-400">
+									{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(attachmentLimits.MAX_FILE_SIZE_BYTES)}
+								</div>
+							</div>
+							{effectiveSelectedFiles.length > 0 ? (
+								<ul className="mt-3 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+									{effectiveSelectedFiles.map((f) => (
+										<li key={f.name} className="flex items-center justify-between gap-3">
+											<span className="min-w-0 truncate">{f.name}</span>
+											<span className="shrink-0 text-gray-500 dark:text-gray-400">{formatSize(f.size)}</span>
+										</li>
+									))}
+								</ul>
+							) : null}
+						</div>
+								<div className="flex items-center justify-between">
+									<span className="text-xs text-gray-500 dark:text-gray-400">
+										每帖最多 {attachmentLimits.MAX_ATTACHMENTS_PER_POST} 个附件
+									</span>
+									<button
+										type="button"
+										onClick={startUpload}
+										disabled={busy || effectiveSelectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused || selectionSize.overLimit}
+										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+									>
+										{busy ? "上传中..." : "开始上传"}
+									</button>
+								</div>
 
 									{queue.length > 0 ? (
 										<ul className="mt-2 space-y-2">

@@ -28,6 +28,7 @@ export type AttachmentUploadRecord = {
 const MIN_FILE_SIZE_BYTES = 1024;
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_POST = 3;
+const MAX_TOTAL_POST_BYTES = 500 * 1024 * 1024;
 const MULTIPART_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const PART_SIZE_BYTES = 5 * 1024 * 1024;
 const UPLOAD_EXPIRES_MS = 60 * 60 * 1000;
@@ -72,14 +73,6 @@ export function getAttachmentsBucket(context: AppLoadContext): R2Bucket {
 		throw new Response("附件存储未启用：请先在 Cloudflare Dashboard 开启 R2 并绑定存储桶", { status: 503 });
 	}
 	return bucket;
-}
-
-function randomHex(bytes: number) {
-	const data = new Uint8Array(bytes);
-	crypto.getRandomValues(data);
-	return Array.from(data)
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("");
 }
 
 function sanitizeFilename(name: string) {
@@ -242,8 +235,24 @@ export async function createUploadRecord(args: {
 	if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
 		throw new Response("每个帖子最多上传 3 个附件", { status: 400 });
 	}
+	const db = getDBFromContext(args.context);
+	const usedRow = await queryOne<{ sum: number | string | null }>(
+		db,
+		"SELECT COALESCE(SUM(size_bytes), 0) as sum FROM attachments WHERE post_id = ?",
+		[args.postId],
+	);
+	const reservedRow = await queryOne<{ sum: number | string | null }>(
+		db,
+		"SELECT COALESCE(SUM(size_bytes), 0) as sum FROM attachment_uploads WHERE post_id = ? AND expires_at > ?",
+		[args.postId, now],
+	);
+	const usedBytes = Number(usedRow?.sum ?? 0);
+	const reservedBytes = Number(reservedRow?.sum ?? 0);
+	if (usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_POST_BYTES) {
+		throw new Response("单帖附件总大小最多 500MB", { status: 400 });
+	}
 	const safeName = sanitizeFilename(args.filename);
-	const key = `posts/${args.postId}/${now}_${randomHex(6)}_${safeName}`;
+	const key = `posts/${args.postId}/${crypto.randomUUID()}_${safeName}`;
 	const bucket = getAttachmentsBucket(args.context);
 	const expiresAt = now + UPLOAD_EXPIRES_MS;
 	let uploadId = "single";
@@ -260,7 +269,6 @@ export async function createUploadRecord(args: {
 		});
 		uploadId = upload.uploadId;
 	}
-	const db = getDBFromContext(args.context);
 	await execute(
 		db,
 		"INSERT INTO attachment_uploads (post_id, uploader_id, r2_key, upload_id, filename, mime_type, size_bytes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -444,6 +452,7 @@ export const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES,
 	MAX_FILE_SIZE_BYTES,
 	MAX_ATTACHMENTS_PER_POST,
+	MAX_TOTAL_POST_BYTES,
 	MULTIPART_THRESHOLD_BYTES,
 	PART_SIZE_BYTES,
 };
