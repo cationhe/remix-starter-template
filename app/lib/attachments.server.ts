@@ -117,12 +117,15 @@ function getFileExtension(filename: string) {
 	return clean.slice(idx + 1).toLowerCase();
 }
 
-export function validateAttachmentMeta(args: { filename: string; mimeType: string; sizeBytes: number }) {
+export function validateAttachmentMeta(
+	args: { filename: string; mimeType: string; sizeBytes: number },
+	options?: { bypassMaxSize?: boolean },
+) {
 	const size = args.sizeBytes;
 	if (!Number.isFinite(size) || size < MIN_FILE_SIZE_BYTES) {
 		return "文件大小需在 1KB 到 100MB 之间";
 	}
-	if (size > MAX_FILE_SIZE_BYTES) {
+	if (!options?.bypassMaxSize && size > MAX_FILE_SIZE_BYTES) {
 		return "文件大小需在 1KB 到 100MB 之间";
 	}
 	const ext = getFileExtension(args.filename);
@@ -317,13 +320,15 @@ export async function createCommentUploadRecord(args: {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
+	isSuperadmin?: boolean;
 }) {
 	const now = Date.now();
 	await cleanupExpiredCommentUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
+	const isSuperadmin = Boolean(args.isSuperadmin);
 	const existing = await countCommentAttachmentsForComment(args.context, args.commentId);
 	let active = await countActiveCommentUploadsForComment(args.context, args.commentId, now);
-	if (existing + active >= MAX_ATTACHMENTS_PER_COMMENT) {
+	if (!isSuperadmin && existing + active >= MAX_ATTACHMENTS_PER_COMMENT) {
 		if (existing < MAX_ATTACHMENTS_PER_COMMENT && active > 0) {
 			const db = getDBFromContext(args.context);
 			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
@@ -376,7 +381,7 @@ export async function createCommentUploadRecord(args: {
 	);
 	const usedBytes = Number(usedRow?.sum ?? 0);
 	const reservedBytes = Number(reservedRow?.sum ?? 0);
-	if (usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_COMMENT_BYTES) {
+	if (!isSuperadmin && usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_COMMENT_BYTES) {
 		throw new Response("单条评论附件总大小最多 500MB", { status: 400 });
 	}
 	const safeName = sanitizeFilename(args.filename);
@@ -542,13 +547,15 @@ export async function createUploadRecord(args: {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
+	isSuperadmin?: boolean;
 }) {
 	const now = Date.now();
 	await cleanupExpiredUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
+	const isSuperadmin = Boolean(args.isSuperadmin);
 	const existing = await countAttachmentsForPost(args.context, args.postId);
 	let active = await countActiveUploadsForPost(args.context, args.postId, now);
-	if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
+	if (!isSuperadmin && existing + active >= MAX_ATTACHMENTS_PER_POST) {
 		if (existing < MAX_ATTACHMENTS_PER_POST && active > 0) {
 			const db = getDBFromContext(args.context);
 			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
@@ -601,7 +608,7 @@ export async function createUploadRecord(args: {
 	);
 	const usedBytes = Number(usedRow?.sum ?? 0);
 	const reservedBytes = Number(reservedRow?.sum ?? 0);
-	if (usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_POST_BYTES) {
+	if (!isSuperadmin && usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_POST_BYTES) {
 		throw new Response("单帖附件总大小最多 500MB", { status: 400 });
 	}
 	const safeName = sanitizeFilename(args.filename);

@@ -4,7 +4,14 @@ import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
-import { assertNotBanned, findUserById, requireUser } from "~/lib/auth.server";
+import {
+	assertAdmin,
+	assertNotBanned,
+	findUserById,
+	getClientIp,
+	requireUser,
+	sendEmail,
+} from "~/lib/auth.server";
 import {
 	getAttachmentStorageUsage,
 	getAttachmentsBucket,
@@ -33,6 +40,13 @@ type PostDetail = {
 	createdAt: number;
 	authorId: number;
 	authorName: string;
+	isBanned: number;
+	bannedAt: number | null;
+	bannedBy: number | null;
+	bannedReason: string | null;
+	pinnedUntilMs: number | null;
+	pinnedAt: number | null;
+	pinnedBy: number | null;
 };
 
 type CommentItem = {
@@ -97,7 +111,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const db = getDBFromContext(context);
 	const post = await queryOne<PostDetail>(
 		db,
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.author_id as authorId, users.display_name as authorName FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ?",
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ?",
 		[id],
 	);
 	if (!post) {
@@ -184,6 +198,192 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const db = getDBFromContext(context);
 	const currentUrl = new URL(request.url);
 	const wantsJson = Boolean(request.headers.get("Accept")?.includes("application/json"));
+	const ip = getClientIp(request);
+	const userAgent = request.headers.get("User-Agent");
+
+	if (intent === "banPost") {
+		assertAdmin(user);
+		const reason = String(formData.get("reason") || "").trim();
+		if (!reason) {
+			return json<ActionData>({ formError: "请输入封禁原因" }, { status: 400 });
+		}
+		const postRow = await queryOne<{ authorId: number; isBanned: number }>(
+			db,
+			"SELECT author_id as authorId, is_banned as isBanned FROM posts WHERE id = ?",
+			[postId],
+		);
+		if (!postRow) {
+			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		if (postRow.isBanned) {
+			return json<ActionData>({ formError: "帖子已封禁" }, { status: 400 });
+		}
+		const now = Date.now();
+		await execute(
+			db,
+			"UPDATE posts SET is_banned = 1, banned_at = ?, banned_by = ?, banned_reason = ? WHERE id = ?",
+			[now, userId, reason, postId],
+		);
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "post_banned", ip, userAgent, JSON.stringify({ postId, postAuthorId: postRow.authorId, reason }), now],
+			);
+		} catch {
+		}
+		if (user.role === "admin") {
+			const env = (context as any).cloudflare?.env as any;
+			const to = String(env?.SUPERADMIN_EMAIL || "").trim();
+			if (to) {
+				const subject = "管理员封禁了帖子";
+				const text =
+					`管理员已封禁帖子（ID: ${postId}）。\n\n` +
+					`封禁原因：${reason}\n` +
+					`操作者：${user.displayName}（ID: ${userId}）\n` +
+					`时间：${new Date(now).toLocaleString()}`;
+				try {
+					await sendEmail(context, { to, subject, text });
+					try {
+						await execute(
+							db,
+							"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+							[userId, "post_ban_notify_superadmin_sent", ip, userAgent, JSON.stringify({ postId, to }), Date.now()],
+						);
+					} catch {
+					}
+				} catch (error) {
+					try {
+						await execute(
+							db,
+							"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+							[
+								userId,
+								"post_ban_notify_superadmin_failed",
+								ip,
+								userAgent,
+								JSON.stringify({ postId, to, message: error instanceof Error ? error.message : "" }),
+								Date.now(),
+							],
+						);
+					} catch {
+					}
+				}
+			}
+		}
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "unbanPost") {
+		if (user.role !== "superadmin") {
+			return json<ActionData>({ formError: "只有超级管理员可以解封帖子" }, { status: 403 });
+		}
+		const postRow = await queryOne<{ isBanned: number }>(
+			db,
+			"SELECT is_banned as isBanned FROM posts WHERE id = ?",
+			[postId],
+		);
+		if (!postRow) {
+			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		if (!postRow.isBanned) {
+			return json<ActionData>({ formError: "帖子未封禁" }, { status: 400 });
+		}
+		const now = Date.now();
+		await execute(
+			db,
+			"UPDATE posts SET is_banned = 0, banned_at = NULL, banned_by = NULL, banned_reason = NULL WHERE id = ?",
+			[postId],
+		);
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "post_unbanned", ip, userAgent, JSON.stringify({ postId }), now],
+			);
+		} catch {
+		}
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "setPin") {
+		if (user.role !== "superadmin") {
+			return json<ActionData>({ formError: "只有超级管理员可以设置置顶" }, { status: 403 });
+		}
+		const mode = String(formData.get("mode") || "");
+		const now = Date.now();
+		let pinnedUntilMs: number | null = null;
+		if (mode === "off") {
+			pinnedUntilMs = null;
+		} else if (mode === "permanent") {
+			pinnedUntilMs = 0;
+		} else if (mode === "1h") {
+			pinnedUntilMs = now + 60 * 60 * 1000;
+		} else if (mode === "1d") {
+			pinnedUntilMs = now + 24 * 60 * 60 * 1000;
+		} else if (mode === "7d") {
+			pinnedUntilMs = now + 7 * 24 * 60 * 60 * 1000;
+		} else {
+			return json<ActionData>({ formError: "无效的置顶选项" }, { status: 400 });
+		}
+		if (pinnedUntilMs === null) {
+			await execute(
+				db,
+				"UPDATE posts SET pinned_until_ms = NULL, pinned_at = NULL, pinned_by = NULL WHERE id = ?",
+				[postId],
+			);
+		} else {
+			await execute(
+				db,
+				"UPDATE posts SET pinned_until_ms = ?, pinned_at = ?, pinned_by = ? WHERE id = ?",
+				[pinnedUntilMs, now, userId, postId],
+			);
+		}
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "post_pin_set", ip, userAgent, JSON.stringify({ postId, pinnedUntilMs }), now],
+			);
+		} catch {
+		}
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "deleteBannedPost") {
+		if (user.role !== "superadmin") {
+			return json<ActionData>({ formError: "只有超级管理员可以删除封禁帖子" }, { status: 403 });
+		}
+		const postRow = await queryOne<{ isBanned: number }>(
+			db,
+			"SELECT is_banned as isBanned FROM posts WHERE id = ?",
+			[postId],
+		);
+		if (!postRow) {
+			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		if (!postRow.isBanned) {
+			return json<ActionData>({ formError: "只能删除已封禁的帖子" }, { status: 400 });
+		}
+		try {
+			await removeAllAttachmentsForPost(context, postId);
+			await removeAllCommentAttachmentsForPost(context, postId);
+			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
+			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
+			await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_deleted_by_superadmin", ip, userAgent, JSON.stringify({ postId }), Date.now()],
+				);
+			} catch {
+			}
+			return redirect("/posts");
+		} catch {
+			return json<ActionData>({ formError: "删除失败，请稍后重试" }, { status: 500 });
+		}
+	}
 
 	if (intent === "delete") {
 		const postOwner = await queryOne<{ authorId: number }>(
@@ -372,6 +572,19 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 	}
 
+	if (intent !== "comment") {
+		return json<ActionData>({ formError: "未知操作" }, { status: 400 });
+	}
+
+	const postState = await queryOne<{ isBanned: number }>(
+		db,
+		"SELECT is_banned as isBanned FROM posts WHERE id = ?",
+		[postId],
+	);
+	if (postState?.isBanned) {
+		return json<ActionData>({ formError: "该帖子已封禁，禁止跟帖回复" }, { status: 403 });
+	}
+
 	const content = String(formData.get("content") || "").trim();
 	const fieldErrors: ActionData["fieldErrors"] = {};
 	if (!content) {
@@ -399,6 +612,12 @@ export default function PostDetailPage() {
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
 	const isBanned = Boolean(data.user?.isBanned);
+	const postBanned = Boolean(data.post.isBanned);
+	const postPinned =
+		data.post.pinnedUntilMs === 0 ||
+		(typeof data.post.pinnedUntilMs === "number" && data.post.pinnedUntilMs > Date.now());
+	const isAdminUser = Boolean(data.user && (data.user.role === "admin" || data.user.role === "superadmin"));
+	const isSuperadminUser = data.user?.role === "superadmin";
 	const commentStartIndex = (data.page - 1) * data.pageSize;
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
@@ -406,6 +625,9 @@ export default function PostDetailPage() {
 	const canManageAttachments = Boolean(isAuthor && !isBanned);
 	const uploadsPaused = data.attachmentStorage.paused;
 	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
+	const maxFilesPerPost = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
+	const maxTotalPostBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_POST_BYTES;
+	const maxFileSizeBytesForUser = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_FILE_SIZE_BYTES;
 
 	type UploadItem = {
 		id: string;
@@ -430,8 +652,8 @@ export default function PostDetailPage() {
 	const remainingSlots = useMemo(() => {
 		const existing = attachments.length;
 		const uploading = queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
-		return Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_POST - existing - uploading);
-	}, [attachments.length, queue]);
+		return Math.max(0, maxFilesPerPost - existing - uploading);
+	}, [attachments.length, maxFilesPerPost, queue]);
 
 	const existingBytes = useMemo(() => {
 		return attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
@@ -458,11 +680,15 @@ export default function PostDetailPage() {
 			(sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0),
 			0,
 		);
-		const remainingBytes = Math.max(0, attachmentLimits.MAX_TOTAL_POST_BYTES - existingBytes - uploadingBytes);
-		return { selectedBytes, remainingBytes, overLimit: selectedBytes > remainingBytes };
-	}, [effectiveSelectedFiles, existingBytes, uploadingBytes]);
+		const remainingBytes = maxTotalPostBytes === Number.POSITIVE_INFINITY
+			? Number.POSITIVE_INFINITY
+			: Math.max(0, maxTotalPostBytes - existingBytes - uploadingBytes);
+		const overLimit = maxTotalPostBytes === Number.POSITIVE_INFINITY ? false : selectedBytes > remainingBytes;
+		return { selectedBytes, remainingBytes, overLimit };
+	}, [effectiveSelectedFiles, existingBytes, maxTotalPostBytes, uploadingBytes]);
 
 	function formatSize(bytes: number) {
+		if (bytes === Number.POSITIVE_INFINITY) return "不限";
 		if (!Number.isFinite(bytes) || bytes < 0) return "-";
 		if (bytes < 1024) return `${bytes} B`;
 		const kb = bytes / 1024;
@@ -474,8 +700,11 @@ export default function PostDetailPage() {
 	}
 
 	function validateLocal(file: File) {
-		if (file.size < attachmentLimits.MIN_FILE_SIZE_BYTES || file.size > attachmentLimits.MAX_FILE_SIZE_BYTES) {
-			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(attachmentLimits.MAX_FILE_SIZE_BYTES)} 之间`;
+		if (file.size < attachmentLimits.MIN_FILE_SIZE_BYTES) {
+			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(maxFileSizeBytesForUser)} 之间`;
+		}
+		if (!isSuperadminUser && file.size > attachmentLimits.MAX_FILE_SIZE_BYTES) {
+			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(maxFileSizeBytesForUser)} 之间`;
 		}
 		const name = String(file.name || "");
 		const idx = name.lastIndexOf(".");
@@ -941,8 +1170,10 @@ export default function PostDetailPage() {
 	async function startCommentUpload(commentId: number, existingAttachments: CommentAttachmentRecord[]) {
 		const current = commentUploads[commentId] || { selectedFiles: [], queue: [], busy: false, error: null };
 		if (current.busy) return;
+		const maxFilesPerComment = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
+		const maxTotalCommentBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
 		const uploadingCount = current.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
-		const remainingSlots = Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT - existingAttachments.length - uploadingCount);
+		const remainingSlots = Math.max(0, maxFilesPerComment - existingAttachments.length - uploadingCount);
 		if (remainingSlots <= 0) {
 			updateCommentUploads(commentId, (c) => ({ ...c, error: "该评论附件数量已达上限" }));
 			return;
@@ -957,8 +1188,11 @@ export default function PostDetailPage() {
 			.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
 		const files = current.selectedFiles.slice(0, remainingSlots);
 		const selectedBytes = files.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
-		if (existingBytes + uploadingBytes + selectedBytes > attachmentLimits.MAX_TOTAL_COMMENT_BYTES) {
-			updateCommentUploads(commentId, (c) => ({ ...c, error: "已超出单条评论附件总大小上限（500MB）" }));
+		if (maxTotalCommentBytes !== Number.POSITIVE_INFINITY && existingBytes + uploadingBytes + selectedBytes > maxTotalCommentBytes) {
+			updateCommentUploads(commentId, (c) => ({
+				...c,
+				error: `已超出单条评论附件总大小上限（${formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}）`,
+			}));
 			return;
 		}
 
@@ -1119,7 +1353,7 @@ export default function PostDetailPage() {
 			return;
 		}
 		if (selectionSize.overLimit) {
-			setGlobalError("已超出单帖附件总大小上限（500MB）");
+			setGlobalError(`已超出单帖附件总大小上限（${formatSize(attachmentLimits.MAX_TOTAL_POST_BYTES)}）`);
 			return;
 		}
 		if (remainingSlots <= 0) {
@@ -1183,6 +1417,16 @@ export default function PostDetailPage() {
 						</h1>
 						<p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
 							<span>作者：{data.post.authorName}</span>
+							{postPinned ? (
+								<span className="ml-2 rounded bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+									置顶
+								</span>
+							) : null}
+							{postBanned ? (
+								<span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-200">
+									已封禁
+								</span>
+							) : null}
 							<span className="ml-3">
 								发布时间：{new Date(data.post.createdAt).toLocaleString()}
 							</span>
@@ -1192,6 +1436,12 @@ export default function PostDetailPage() {
 					</div>
 				</header>
 				<main className="flex flex-col gap-6">
+					{postBanned ? (
+						<div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
+							<div className="font-medium">该帖子已被封禁，禁止跟帖回复</div>
+							{data.post.bannedReason ? <div className="mt-1">封禁原因：{data.post.bannedReason}</div> : null}
+						</div>
+					) : null}
 					{isBanned ? (
 						<div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
 							账号已被封禁，无法删帖、点赞或发表评论。
@@ -1278,6 +1528,103 @@ export default function PostDetailPage() {
 						</div>
 						{actionData?.formError ? (
 							<p className="mb-3 text-sm text-red-600">{actionData.formError}</p>
+						) : null}
+						{isAdminUser ? (
+							<div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-700 dark:bg-gray-900/30">
+								<div className="mb-2 text-sm font-medium text-gray-900 dark:text-gray-100">管理操作</div>
+								<div className="flex flex-col gap-3">
+									{postBanned ? (
+										<div className="flex flex-wrap items-center gap-2">
+											{isSuperadminUser ? (
+												<Form method="post">
+													<input type="hidden" name="intent" value="unbanPost" />
+													<button
+														type="submit"
+														className="rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+													>
+														解封帖子
+													</button>
+												</Form>
+											) : (
+												<span className="text-xs text-gray-500 dark:text-gray-400">只有超级管理员可以解封</span>
+											)}
+											{isSuperadminUser ? (
+												<Form
+													method="post"
+													onSubmit={(e) => {
+														const ok = window.confirm("确认永久删除该封禁帖子吗？此操作不可恢复。\n\n删除后将同时删除该帖的评论、点赞与附件。");
+														if (!ok) e.preventDefault();
+													}}
+												>
+													<input type="hidden" name="intent" value="deleteBannedPost" />
+													<button type="submit" className="rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700">
+														永久删除
+													</button>
+												</Form>
+											) : null}
+										</div>
+									) : (
+										<Form
+											method="post"
+											onSubmit={(e) => {
+												const ok = window.confirm("确认封禁该帖子吗？封禁后所有用户将无法跟帖回复。\n\n如为管理员操作，将自动通知超级管理员备案。");
+												if (!ok) e.preventDefault();
+											}}
+											className="flex flex-col gap-2 sm:flex-row sm:items-end"
+										>
+											<input type="hidden" name="intent" value="banPost" />
+											<div className="flex-1">
+												<label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">封禁原因</label>
+												<input
+													name="reason"
+													maxLength={200}
+													className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+													placeholder="请输入封禁原因（必填）"
+												/>
+											</div>
+											<button type="submit" className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+												封禁帖子
+											</button>
+										</Form>
+									)}
+									{isSuperadminUser ? (
+										<div className="flex flex-wrap items-center gap-2">
+											<Form method="post">
+												<input type="hidden" name="intent" value="setPin" />
+												<input type="hidden" name="mode" value="off" />
+												<button
+													type="submit"
+													disabled={!postPinned}
+													className="rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-60 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+												>
+													取消置顶
+												</button>
+											</Form>
+											<Form method="post">
+												<input type="hidden" name="intent" value="setPin" />
+												<input type="hidden" name="mode" value="1d" />
+												<button type="submit" className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-white hover:bg-amber-700">
+													置顶1天
+												</button>
+											</Form>
+											<Form method="post">
+												<input type="hidden" name="intent" value="setPin" />
+												<input type="hidden" name="mode" value="7d" />
+												<button type="submit" className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-white hover:bg-amber-700">
+													置顶7天
+												</button>
+											</Form>
+											<Form method="post">
+												<input type="hidden" name="intent" value="setPin" />
+												<input type="hidden" name="mode" value="permanent" />
+												<button type="submit" className="rounded bg-amber-600 px-3 py-1 text-sm font-medium text-white hover:bg-amber-700">
+													永久置顶
+												</button>
+											</Form>
+										</div>
+									) : null}
+								</div>
+							</div>
 						) : null}
 						<div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-800 dark:text-gray-100">
 							{data.post.content}
@@ -1398,7 +1745,7 @@ export default function PostDetailPage() {
 											上传附件
 										</label>
 										<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-											<span>剩余可上传：{remainingSlots} 个</span>
+													<span>剩余可上传：{isSuperadminUser ? "不限" : remainingSlots} 个</span>
 											<span>
 												已选 {formatSize(selectionSize.selectedBytes)} / 剩余 {formatSize(selectionSize.remainingBytes)}
 											</span>
@@ -1408,7 +1755,9 @@ export default function PostDetailPage() {
 												</span>
 											) : null}
 											{selectionSize.overLimit ? (
-												<span className="text-red-600 dark:text-red-300">已超出 500MB 上限</span>
+												<span className="text-red-600 dark:text-red-300">
+													已超出 {formatSize(attachmentLimits.MAX_TOTAL_POST_BYTES)} 上限
+												</span>
 											) : null}
 										</div>
 									</div>
@@ -1493,14 +1842,14 @@ export default function PostDetailPage() {
 									<div className="font-medium">
 										拖拽文件到此处，或点击选择文件
 									</div>
-									<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-										单帖总大小上限 500MB；大文件将自动分块上传
+											<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+												单帖总大小上限 {formatSize(maxTotalPostBytes)}；大文件将自动分块上传
+											</div>
+										</div>
+										<div className="text-xs text-gray-500 dark:text-gray-400">
+											{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(maxFileSizeBytesForUser)}
+										</div>
 									</div>
-								</div>
-								<div className="text-xs text-gray-500 dark:text-gray-400">
-									{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(attachmentLimits.MAX_FILE_SIZE_BYTES)}
-								</div>
-							</div>
 							{effectiveSelectedFiles.length > 0 ? (
 								<ul className="mt-3 space-y-1 text-xs text-gray-700 dark:text-gray-200">
 									{effectiveSelectedFiles.map((f) => (
@@ -1516,9 +1865,7 @@ export default function PostDetailPage() {
 							) : null}
 						</div>
 								<div className="flex items-center justify-between">
-									<span className="text-xs text-gray-500 dark:text-gray-400">
-										每帖最多 {attachmentLimits.MAX_ATTACHMENTS_PER_POST} 个附件
-									</span>
+										<span className="text-xs text-gray-500 dark:text-gray-400">每帖最多 {maxFilesPerPost === 999 ? "不限" : maxFilesPerPost} 个附件</span>
 									<button
 										type="button"
 										onClick={startUpload}
@@ -1710,17 +2057,18 @@ export default function PostDetailPage() {
 												<div className="flex items-center justify-between gap-3">
 													<div className="min-w-0">
 														<div className="text-sm font-medium text-gray-900 dark:text-gray-100">上传评论附件</div>
-														<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-															剩余可上传：
-															{Math.max(
-																0,
-																attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT -
-																	comment.attachments.length -
-																	(commentUploads[comment.id]?.queue.filter((q) => q.status === "pending" || q.status === "uploading")
-																		.length || 0),
-															)}
-															个；单条评论总大小上限 500MB
-														</div>
+												<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+													剩余可上传：
+													{(() => {
+														const maxFilesPerComment = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
+														const uploading =
+															commentUploads[comment.id]?.queue.filter((q) => q.status === "pending" || q.status === "uploading")
+																.length || 0;
+														const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploading);
+														return maxFilesPerComment === 999 ? "不限" : String(remaining);
+													})()}
+													个；单条评论总大小上限 {formatSize(isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
+												</div>
 													</div>
 													<button
 														type="button"
@@ -1747,15 +2095,20 @@ export default function PostDetailPage() {
 													{(() => {
 														const state = commentUploads[comment.id] || { selectedFiles: [], queue: [], busy: false, error: null };
 														const uploadingCount = state.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
-														const remaining = Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT - comment.attachments.length - uploadingCount);
+														const maxFilesPerComment = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
+														const maxTotalCommentBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
+														const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploadingCount);
 														const effective = state.selectedFiles.slice(0, remaining);
 														const existingBytes = comment.attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
 														const uploadingBytes = state.queue
 															.filter((q) => q.status === "pending" || q.status === "uploading")
 															.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
 														const selectedBytes = effective.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
-														const remainingBytes = Math.max(0, attachmentLimits.MAX_TOTAL_COMMENT_BYTES - existingBytes - uploadingBytes);
-														const overLimit = selectedBytes > remainingBytes;
+														const remainingBytes =
+															maxTotalCommentBytes === Number.POSITIVE_INFINITY
+																? Number.POSITIVE_INFINITY
+																: Math.max(0, maxTotalCommentBytes - existingBytes - uploadingBytes);
+														const overLimit = maxTotalCommentBytes === Number.POSITIVE_INFINITY ? false : selectedBytes > remainingBytes;
 														return (
 															<>
 																<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
@@ -1767,8 +2120,12 @@ export default function PostDetailPage() {
 																			已选择 {state.selectedFiles.length} 个，仅上传前 {remaining} 个
 																		</span>
 																	) : null}
-																	{overLimit ? <span className="text-red-600 dark:text-red-300">已超出 500MB 上限</span> : null}
-																</div>
+																{overLimit ? (
+																	<span className="text-red-600 dark:text-red-300">
+																		已超出 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)} 上限
+																	</span>
+																) : null}
+															</div>
 																{effective.length > 0 ? (
 																	<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
 																		{effective.map((f) => (
@@ -1882,6 +2239,8 @@ export default function PostDetailPage() {
 								<p className="text-sm text-gray-600 dark:text-gray-300">
 									当前账号已被封禁，无法发表评论。
 								</p>
+							) : postBanned ? (
+								<p className="text-sm text-gray-600 dark:text-gray-300">该帖子已封禁，禁止跟帖回复。</p>
 							) : (
 							<Form method="post" className="space-y-4">
 								<input type="hidden" name="intent" value="comment" />

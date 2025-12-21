@@ -1,9 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, useActionData, useNavigation } from "@remix-run/react";
+import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import {
 	consumeRateLimit,
 	findUserByEmail,
+	getRegistrationPaused,
 	getClientIp,
 	promoteToSuperadminIfMatch,
 	registerUser,
@@ -20,11 +21,17 @@ type ActionData = {
 	formError?: string;
 };
 
-export async function loader({}: LoaderFunctionArgs) {
-	return json({});
+export async function loader({ context }: LoaderFunctionArgs) {
+	const registrationPaused = await getRegistrationPaused(context);
+	return json({ registrationPaused });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
+	const registrationPaused = await getRegistrationPaused(context);
+	if (registrationPaused) {
+		return json<ActionData>({ formError: "当前暂停注册，系统维护中，请稍后再试" }, { status: 403 });
+	}
+
 	const formData = await request.formData();
 	const email = String(formData.get("email") || "").trim();
 	const displayName = String(formData.get("displayName") || "").trim();
@@ -110,16 +117,32 @@ export async function action({ request, context }: ActionFunctionArgs) {
 }
 
 export default function Register() {
+	const loaderData = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
+	const registrationPaused = loaderData.registrationPaused;
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900">
 			<div className="w-full max-w-md rounded-xl bg-white p-8 shadow dark:bg-gray-800">
 				<h1 className="mb-6 text-center text-2xl font-semibold text-gray-900 dark:text-gray-100">
 					注册账号
 				</h1>
-				<Form method="post" className="space-y-5">
+				{registrationPaused ? (
+					<div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
+						<div className="font-medium">当前暂停注册</div>
+						<div className="mt-1">系统维护中，请稍后再试。</div>
+						<div className="mt-3 flex items-center gap-3">
+							<a href="/login" className="text-blue-600 hover:underline dark:text-blue-400">
+								去登录
+							</a>
+							<a href="/" className="text-blue-600 hover:underline dark:text-blue-400">
+								返回首页
+							</a>
+						</div>
+					</div>
+				) : (
+					<Form method="post" className="space-y-5">
 					<div>
 						<label
 							htmlFor="register-email"
@@ -202,6 +225,7 @@ export default function Register() {
 						{isSubmitting ? "注册中..." : "注册"}
 					</button>
 				</Form>
+				)}
 				<p className="mt-4 text-center text-sm text-gray-600 dark:text-gray-300">
 					已有账号？
 					<a href="/login" className="ml-1 text-blue-600 hover:underline">

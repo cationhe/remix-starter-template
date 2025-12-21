@@ -23,6 +23,7 @@ type ActionData =
 export async function action({ request, context, params }: ActionFunctionArgs) {
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
+	const isSuperadminUser = user.role === "superadmin";
 	const rawId = params.id;
 	const postId = rawId ? Number(rawId) : NaN;
 	if (!rawId || Number.isNaN(postId)) {
@@ -50,7 +51,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const filename = String(body?.filename || "");
 	const mimeType = String(body?.mimeType || "");
 	const sizeBytes = Number(body?.sizeBytes || 0);
-	const metaError = validateAttachmentMeta({ filename, mimeType, sizeBytes });
+	const metaError = validateAttachmentMeta({ filename, mimeType, sizeBytes }, { bypassMaxSize: isSuperadminUser });
 	if (metaError) {
 		return json<ActionData>({ ok: false, error: metaError }, { status: 400 });
 	}
@@ -63,6 +64,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			filename,
 			mimeType,
 			sizeBytes,
+			isSuperadmin: isSuperadminUser,
 		});
 		return json<ActionData>({
 			ok: true,

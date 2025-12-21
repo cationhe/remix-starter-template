@@ -47,6 +47,24 @@ export function assertAdmin(user: AuthUser) {
 	}
 }
 
+export async function getRegistrationPaused(context: AppLoadContext) {
+	try {
+		const db = getDBFromContext(context);
+		const row = await queryOne<{ valueJson: string }>(
+			db,
+			"SELECT value_json as valueJson FROM app_settings WHERE key = ?",
+			["registration_paused"],
+		);
+		if (!row?.valueJson) {
+			return false;
+		}
+		const parsed = JSON.parse(row.valueJson) as unknown;
+		return parsed === true;
+	} catch {
+		return false;
+	}
+}
+
 export async function requireUserId(request: Request, context: AppLoadContext) {
 	const session = await getSession(request, context);
 	const userId = session.get("userId") as number | undefined;

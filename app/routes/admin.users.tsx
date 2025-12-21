@@ -2,7 +2,15 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData } from "@remix-run/react";
 import { useEffect, useMemo, useState } from "react";
-import { assertAdmin, assertNotBanned, getClientIp, requireUser, sendEmail, type UserRole } from "~/lib/auth.server";
+import {
+	assertAdmin,
+	assertNotBanned,
+	getClientIp,
+	getRegistrationPaused,
+	requireUser,
+	sendEmail,
+	type UserRole,
+} from "~/lib/auth.server";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 
 type UserListItem = {
@@ -48,7 +56,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		db,
 		"SELECT id as id, email as email, display_name as displayName, created_at as createdAt, role as role, is_banned as isBanned, banned_at as bannedAt, must_change_password as mustChangePassword, temp_password_expires_at as tempPasswordExpiresAt FROM users ORDER BY created_at DESC LIMIT 200",
 	);
-	return json({ me, users });
+	const registrationPaused = await getRegistrationPaused(context);
+	return json({ me, users, registrationPaused });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -58,6 +67,47 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	const formData = await request.formData();
 	const intent = String(formData.get("intent") || "");
+	if (intent === "setRegistrationPaused") {
+		if (me.role !== "superadmin") {
+			return json<ActionData>({ formError: "只有超级管理员可以修改注册状态" }, { status: 403 });
+		}
+		const pausedRaw = String(formData.get("paused") || "");
+		const paused = pausedRaw === "1";
+		const now = Date.now();
+		const db = getDBFromContext(context);
+		const ip = getClientIp(request);
+		const userAgent = request.headers.get("User-Agent");
+		try {
+			await execute(
+				db,
+				"INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+				["registration_paused", paused ? "true" : "false", now],
+			);
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					me.id,
+					"registration_paused_set",
+					ip,
+					userAgent,
+					JSON.stringify({ paused }),
+					now,
+				],
+			);
+			return redirect("/admin/users");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such table")) {
+				return json<ActionData>({ formError: "数据库未初始化：缺少必要的数据表" }, { status: 500 });
+			}
+			if (message.includes("no such column")) {
+				return json<ActionData>({ formError: "数据库未升级：请先应用最新迁移" }, { status: 500 });
+			}
+			return json<ActionData>({ formError: "更新注册状态失败，请稍后重试" }, { status: 500 });
+		}
+	}
+
 	const targetUserId = parseId(formData.get("userId"));
 	if (!targetUserId) {
 		return json<ActionData>({ formError: "无效的用户ID" }, { status: 400 });
@@ -308,6 +358,44 @@ export default function AdminUsersPage() {
 						{actionData.formError}
 					</div>
 				) : null}
+
+				<div className="rounded-xl bg-white p-4 shadow dark:bg-gray-800">
+					<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+						<div className="flex flex-col gap-1">
+							<div className="text-sm font-medium text-gray-900 dark:text-gray-100">注册状态</div>
+							<div className="flex flex-wrap items-center gap-2 text-sm">
+								{data.registrationPaused ? (
+									<span className="rounded bg-red-100 px-2 py-1 text-xs text-red-700 dark:bg-red-900/30 dark:text-red-200">
+										已暂停注册
+									</span>
+								) : (
+									<span className="rounded bg-green-100 px-2 py-1 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-200">
+										允许注册
+									</span>
+								)}
+								<span className="text-xs text-gray-500 dark:text-gray-400">在暂停期间，新用户无法注册</span>
+							</div>
+						</div>
+						{data.me.role === "superadmin" ? (
+							<Form method="post" className="flex items-center gap-2">
+								<input type="hidden" name="intent" value="setRegistrationPaused" />
+								<input type="hidden" name="paused" value={data.registrationPaused ? "0" : "1"} />
+								<button
+									type="submit"
+									className={
+										data.registrationPaused
+											? "rounded bg-green-600 px-3 py-1 text-sm font-medium text-white hover:bg-green-700"
+											: "rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700"
+									}
+								>
+									{data.registrationPaused ? "恢复注册" : "暂停注册"}
+								</button>
+							</Form>
+						) : (
+							<span className="text-xs text-gray-500 dark:text-gray-400">只有超级管理员可修改</span>
+						)}
+					</div>
+				</div>
 
 				<div className="rounded-xl bg-white p-4 shadow dark:bg-gray-800">
 					<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">

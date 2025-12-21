@@ -29,6 +29,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
+	const isSuperadminUser = user.role === "superadmin";
 
 	const uploadRecordId = parseId(params.id);
 	if (!uploadRecordId) {
@@ -60,7 +61,10 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "缺少文件" }, { status: 400 });
 	}
 
-	const metaError = validateAttachmentMeta({ filename: file.name, mimeType: file.type, sizeBytes: file.size });
+	const metaError = validateAttachmentMeta(
+		{ filename: file.name, mimeType: file.type, sizeBytes: file.size },
+		{ bypassMaxSize: isSuperadminUser },
+	);
 	if (metaError) {
 		return json<ActionData>({ ok: false, error: metaError }, { status: 400 });
 	}

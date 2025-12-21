@@ -10,6 +10,8 @@ type PostListItem = {
 	title: string;
 	createdAt: number;
 	authorName: string;
+	isBanned: number;
+	pinnedUntilMs: number | null;
 };
 
 type LoaderData = {
@@ -25,9 +27,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		user = await findUserById(context, userId);
 	}
 	const db = getDBFromContext(context);
+	const now = Date.now();
 	const posts = await queryAll<PostListItem>(
 		db,
-		"SELECT posts.id as id, posts.title as title, posts.created_at as createdAt, users.display_name as authorName FROM posts JOIN users ON posts.author_id = users.id ORDER BY posts.created_at DESC LIMIT 50",
+		"SELECT posts.id as id, posts.title as title, posts.created_at as createdAt, users.display_name as authorName, posts.is_banned as isBanned, posts.pinned_until_ms as pinnedUntilMs FROM posts JOIN users ON posts.author_id = users.id ORDER BY (CASE WHEN posts.pinned_until_ms = 0 OR posts.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC, posts.pinned_at DESC, posts.created_at DESC LIMIT 50",
+		[now],
 	);
 	return json<LoaderData>({ user, posts });
 }
@@ -35,6 +39,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 export default function PostsIndex() {
 	const data = useLoaderData<typeof loader>();
 	const isBanned = Boolean(data.user?.isBanned);
+	const now = Date.now();
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
 			<div className="mx-auto flex max-w-3xl flex-col gap-6">
@@ -72,19 +77,33 @@ export default function PostsIndex() {
 						</p>
 					) : (
 						<ul className="divide-y divide-gray-200 dark:divide-gray-700">
-							{data.posts.map((post) => (
-								<li key={post.id} className="px-6 py-4">
-									<Link
-										to={`/posts/${post.id}`}
-										className="text-base font-medium text-blue-700 hover:underline dark:text-blue-400"
-									>
-										{post.title}
-									</Link>
-									<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-										<span>作者：{post.authorName}</span>
-									</div>
-								</li>
-							))}
+							{data.posts.map((post) => {
+								const pinned = post.pinnedUntilMs === 0 || (typeof post.pinnedUntilMs === "number" && post.pinnedUntilMs > now);
+								const banned = Boolean(post.isBanned);
+								return (
+									<li key={post.id} className={pinned ? "bg-amber-50/60 px-6 py-4 dark:bg-amber-900/10" : "px-6 py-4"}>
+										<Link
+											to={`/posts/${post.id}`}
+											className="text-base font-medium text-blue-700 hover:underline dark:text-blue-400"
+										>
+											{post.title}
+										</Link>
+										<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+											<span>作者：{post.authorName}</span>
+											{pinned ? (
+												<span className="ml-2 rounded bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+													置顶
+											</span>
+										) : null}
+											{banned ? (
+												<span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-200">
+													已封禁
+											</span>
+										) : null}
+										</div>
+									</li>
+								);
+							})}
 						</ul>
 					)}
 				</div>
