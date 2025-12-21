@@ -613,7 +613,7 @@
 		- 成功重定向到 `/me?pwdChanged=1`，失败时返回字段错误/通用错误。
 - 质量检查：`npm run lint`（0 errors，5 warnings）+ `npm run typecheck` + `npm run build` 均通过。
 - GitHub：提交并推送 `fefda21`（`fix(me): 改密弹窗与旧密码校验`）。
-- Cloudflare Workers：执行 `npm run deploy` 成功，版本 ID `30ceaea3-5ae0-4ef4-87d1-8ebc-fa4bf9c7baec`。
+- Cloudflare Workers：执行 `npm run deploy` 成功，版本 ID `30ceaea3-5ae0-4ef4-87d1-8eb3a1ce4ccd`。
 
 ## 2025-12-20
 
@@ -1016,3 +1016,13 @@
 - [x] 评论附件上传日志可追踪（结构化字段）
 - [x] 病毒扫描改为 bytes 检测提升兼容性
 - [x] 推送到 GitHub + 部署上线
+
+## 2025-12-21（补充：record.md 同步到 GitHub）
+
+### 本次目标
+
+- 将本地开发记录 `record.md` 同步到 GitHub 仓库，方便追踪与协作。
+
+### 发布与同步
+
+- GitHub：新增 `record.md` 并提交 `787fd9d`（`docs: add record.md`）。
