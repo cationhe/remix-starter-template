@@ -31,6 +31,7 @@ const MAX_ATTACHMENTS_PER_POST = 3;
 const MULTIPART_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const PART_SIZE_BYTES = 5 * 1024 * 1024;
 const UPLOAD_EXPIRES_MS = 60 * 60 * 1000;
+const MAX_TOTAL_STORAGE_BYTES = 9 * 1024 * 1024 * 1024;
 
 const allowedExtensions = new Set([
 	"pdf",
@@ -166,6 +167,45 @@ export async function countActiveUploadsForPost(context: AppLoadContext, postId:
 	return Number(row?.count ?? 0);
 }
 
+export type AttachmentStorageUsage = {
+	usedBytes: number;
+	reservedBytes: number;
+	limitBytes: number;
+	paused: boolean;
+};
+
+export async function getAttachmentStorageUsage(context: AppLoadContext, now = Date.now()): Promise<AttachmentStorageUsage> {
+	const db = getDBFromContext(context);
+	const usedRow = await queryOne<{ sum: number | string | null }>(
+		db,
+		"SELECT COALESCE(SUM(size_bytes), 0) as sum FROM attachments",
+		[],
+	);
+	const reservedRow = await queryOne<{ sum: number | string | null }>(
+		db,
+		"SELECT COALESCE(SUM(size_bytes), 0) as sum FROM attachment_uploads WHERE expires_at > ?",
+		[now],
+	);
+	const usedBytes = Number(usedRow?.sum ?? 0);
+	const reservedBytes = Number(reservedRow?.sum ?? 0);
+	const limitBytes = MAX_TOTAL_STORAGE_BYTES;
+	const paused = usedBytes + reservedBytes >= limitBytes;
+	return { usedBytes, reservedBytes, limitBytes, paused };
+}
+
+export async function assertWithinSiteStorageQuota(args: {
+	context: AppLoadContext;
+	extraBytes: number;
+	now?: number;
+}) {
+	const now = args.now ?? Date.now();
+	const extraBytes = Math.max(0, Number(args.extraBytes || 0));
+	const usage = await getAttachmentStorageUsage(args.context, now);
+	if (usage.usedBytes + usage.reservedBytes + extraBytes > usage.limitBytes) {
+		throw new Response("网站总存储量已超过 9GB，已暂停附件上传", { status: 400 });
+	}
+}
+
 export async function listAttachmentsByPostId(context: AppLoadContext, postId: number) {
 	const db = getDBFromContext(context);
 	const rows = await queryAll<AttachmentRecord>(
@@ -196,6 +236,7 @@ export async function createUploadRecord(args: {
 }) {
 	const now = Date.now();
 	await cleanupExpiredUploads(args.context, now);
+	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
 	const existing = await countAttachmentsForPost(args.context, args.postId);
 	const active = await countActiveUploadsForPost(args.context, args.postId, now);
 	if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
@@ -405,4 +446,8 @@ export const attachmentLimits = {
 	MAX_ATTACHMENTS_PER_POST,
 	MULTIPART_THRESHOLD_BYTES,
 	PART_SIZE_BYTES,
+};
+
+export const attachmentStorageLimits = {
+	MAX_TOTAL_STORAGE_BYTES,
 };

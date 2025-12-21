@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
 import { assertNotBanned, findUserById, requireUser } from "~/lib/auth.server";
-import { listAttachmentsByPostId, removeAllAttachmentsForPost } from "~/lib/attachments.server";
+import { getAttachmentStorageUsage, listAttachmentsByPostId, removeAllAttachmentsForPost } from "~/lib/attachments.server";
 import type { AttachmentRecord } from "~/lib/attachments.server";
 
 const attachmentLimits = {
@@ -36,6 +36,12 @@ type LoaderData = {
 	user: Awaited<ReturnType<typeof findUserById>>;
 	post: PostDetail;
 	attachments: AttachmentRecord[];
+	attachmentStorage: {
+		usedBytes: number;
+		reservedBytes: number;
+		limitBytes: number;
+		paused: boolean;
+	};
 	comments: CommentItem[];
 	commentCount: number;
 	likeCount: number;
@@ -120,11 +126,13 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	);
 
 	const attachments = await listAttachmentsByPostId(context, id);
+	const attachmentStorage = await getAttachmentStorageUsage(context);
 
 	return json<LoaderData>({
 		user,
 		post,
 		attachments,
+		attachmentStorage,
 		comments,
 		commentCount,
 		likeCount,
@@ -235,7 +243,10 @@ export default function PostDetailPage() {
 	const commentStartIndex = (data.page - 1) * data.pageSize;
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
-	const canUpload = Boolean(data.user && data.user.id === data.post.authorId && !isBanned);
+	const isAuthor = Boolean(data.user && data.user.id === data.post.authorId);
+	const canManageAttachments = Boolean(isAuthor && !isBanned);
+	const uploadsPaused = data.attachmentStorage.paused;
+	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
 
 	type UploadItem = {
 		id: string;
@@ -384,7 +395,12 @@ export default function PostDetailPage() {
 	}
 
 	async function startUpload() {
-		if (!canUpload) return;
+		if (!canUpload) {
+			if (canManageAttachments && uploadsPaused) {
+				setGlobalError("网站总存储量已超过 9GB，已暂停附件上传");
+			}
+			return;
+		}
 		setGlobalError(null);
 		if (selectedFiles.length === 0) {
 			setGlobalError("请选择要上传的文件");
@@ -592,7 +608,7 @@ export default function PostDetailPage() {
 							</ul>
 						)}
 
-						{canUpload ? (
+						{canManageAttachments ? (
 							<div className="mt-6 rounded border border-gray-200 p-4 dark:border-gray-700">
 								<div className="flex flex-col gap-3">
 									<div className="flex items-center justify-between">
@@ -603,29 +619,34 @@ export default function PostDetailPage() {
 											剩余可上传：{remainingSlots} 个
 										</span>
 									</div>
-									<input
-										type="file"
-										multiple
-										disabled={busy || remainingSlots <= 0}
-										onChange={(e) => {
-											const files = Array.from(e.target.files || []);
-											setSelectedFiles(files);
-										}}
-										className="block w-full text-sm text-gray-700 file:mr-4 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-900 dark:file:text-gray-100 dark:hover:file:bg-gray-800"
-									/>
+									{uploadsPaused ? (
+										<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+											网站总存储量已超过 9GB，已暂停附件上传
+										</div>
+									) : null}
+					<input
+						type="file"
+						multiple
+										disabled={busy || remainingSlots <= 0 || uploadsPaused}
+						onChange={(e) => {
+							const files = Array.from(e.target.files || []);
+							setSelectedFiles(files);
+						}}
+						className="block w-full text-sm text-gray-700 file:mr-4 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-900 dark:file:text-gray-100 dark:hover:file:bg-gray-800"
+					/>
 									<div className="flex items-center justify-between">
 										<span className="text-xs text-gray-500 dark:text-gray-400">
 											每帖最多 {attachmentLimits.MAX_ATTACHMENTS_PER_POST} 个附件，大文件将自动分块上传
 										</span>
-										<button
-											type="button"
-											onClick={startUpload}
-											disabled={busy || selectedFiles.length === 0 || remainingSlots <= 0}
-											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-										>
-											{busy ? "上传中..." : "开始上传"}
-										</button>
-									</div>
+						<button
+							type="button"
+							onClick={startUpload}
+										disabled={busy || selectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused}
+										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+									>
+										{busy ? "上传中..." : "开始上传"}
+									</button>
+								</div>
 
 									{queue.length > 0 ? (
 										<ul className="mt-2 space-y-2">
