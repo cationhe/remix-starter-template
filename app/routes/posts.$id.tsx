@@ -7,6 +7,7 @@ import { getSession } from "~/lib/session.server";
 import { assertNotBanned, findUserById, requireUser } from "~/lib/auth.server";
 import {
 	getAttachmentStorageUsage,
+	getAttachmentsBucket,
 	listAttachmentsByPostId,
 	listCommentAttachmentsByCommentIds,
 	removeAllAttachmentsForPost,
@@ -182,6 +183,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const intent = String(formData.get("intent") || "comment");
 	const db = getDBFromContext(context);
 	const currentUrl = new URL(request.url);
+	const wantsJson = Boolean(request.headers.get("Accept")?.includes("application/json"));
 
 	if (intent === "delete") {
 		const postOwner = await queryOne<{ authorId: number }>(
@@ -240,6 +242,136 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 	}
 
+	if (intent === "deletePostAttachments") {
+		const postOwner = await queryOne<{ authorId: number }>(
+			db,
+			"SELECT author_id as authorId FROM posts WHERE id = ?",
+			[postId],
+		);
+		if (!postOwner) {
+			return json({ ok: false, error: "帖子不存在" }, { status: 404 });
+		}
+		if (postOwner.authorId !== userId) {
+			return json({ ok: false, error: "无权删除附件" }, { status: 403 });
+		}
+		const ids = formData
+			.getAll("attachmentId")
+			.map((v) => Number(v))
+			.filter((n) => Number.isFinite(n) && n > 0)
+			.map((n) => Math.floor(n));
+		const uniqueIds = Array.from(new Set(ids));
+		if (uniqueIds.length === 0) {
+			return json({ ok: false, error: "未选择要删除的附件" }, { status: 400 });
+		}
+		const placeholders = uniqueIds.map(() => "?").join(",");
+		const rows = await queryAll<{ id: number; r2Key: string }>(
+			db,
+			`SELECT id as id, r2_key as r2Key FROM attachments WHERE post_id = ? AND id IN (${placeholders})`,
+			[postId, ...uniqueIds],
+		);
+		if (rows.length === 0) {
+			return json({ ok: true, deletedIds: [] });
+		}
+		try {
+			await execute(
+				db,
+				`DELETE FROM attachments WHERE post_id = ? AND id IN (${placeholders})`,
+				[postId, ...uniqueIds],
+			);
+			let bucket: R2Bucket | null = null;
+			try {
+				bucket = getAttachmentsBucket(context);
+			} catch {
+				bucket = null;
+			}
+			if (bucket) {
+				for (const row of rows) {
+					try {
+						await bucket.delete(row.r2Key);
+					} catch {
+					}
+				}
+			}
+			const deletedIds = rows.map((r) => r.id);
+			if (wantsJson) return json({ ok: true, deletedIds });
+			return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+		} catch (error) {
+			if (error instanceof Response) {
+				return json({ ok: false, error: await error.text() }, { status: error.status });
+			}
+			return json({ ok: false, error: "删除失败，请稍后重试" }, { status: 500 });
+		}
+	}
+
+	if (intent === "deleteCommentAttachments") {
+		const commentIdRaw = String(formData.get("commentId") || "");
+		const commentId = Number(commentIdRaw);
+		if (!commentIdRaw || Number.isNaN(commentId) || commentId <= 0) {
+			return json({ ok: false, error: "无效的评论ID" }, { status: 400 });
+		}
+		const comment = await queryOne<{ authorId: number; postId: number }>(
+			db,
+			"SELECT author_id as authorId, post_id as postId FROM comments WHERE id = ?",
+			[commentId],
+		);
+		if (!comment) {
+			return json({ ok: false, error: "评论不存在" }, { status: 404 });
+		}
+		if (comment.postId !== postId) {
+			return json({ ok: false, error: "评论不属于当前帖子" }, { status: 400 });
+		}
+		if (comment.authorId !== userId) {
+			return json({ ok: false, error: "无权删除附件" }, { status: 403 });
+		}
+		const ids = formData
+			.getAll("attachmentId")
+			.map((v) => Number(v))
+			.filter((n) => Number.isFinite(n) && n > 0)
+			.map((n) => Math.floor(n));
+		const uniqueIds = Array.from(new Set(ids));
+		if (uniqueIds.length === 0) {
+			return json({ ok: false, error: "未选择要删除的附件" }, { status: 400 });
+		}
+		const placeholders = uniqueIds.map(() => "?").join(",");
+		const rows = await queryAll<{ id: number; r2Key: string }>(
+			db,
+			`SELECT id as id, r2_key as r2Key FROM comment_attachments WHERE comment_id = ? AND id IN (${placeholders})`,
+			[commentId, ...uniqueIds],
+		);
+		if (rows.length === 0) {
+			return json({ ok: true, deletedIds: [] });
+		}
+		try {
+			await execute(
+				db,
+				`DELETE FROM comment_attachments WHERE comment_id = ? AND id IN (${placeholders})`,
+				[commentId, ...uniqueIds],
+			);
+			let bucket: R2Bucket | null = null;
+			try {
+				bucket = getAttachmentsBucket(context);
+			} catch {
+				bucket = null;
+			}
+			if (bucket) {
+				for (const row of rows) {
+					try {
+						await bucket.delete(row.r2Key);
+					} catch {
+					}
+				}
+			}
+			const deletedIds = rows.map((r) => r.id);
+			if (wantsJson) return json({ ok: true, deletedIds });
+			return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+		} catch (error) {
+			if (error instanceof Response) {
+				return json({ ok: false, error: await error.text() }, { status: error.status });
+			}
+			return json({ ok: false, error: "删除失败，请稍后重试" }, { status: 500 });
+		}
+	}
+
 	const content = String(formData.get("content") || "").trim();
 	const fieldErrors: ActionData["fieldErrors"] = {};
 	if (!content) {
@@ -281,7 +413,11 @@ export default function PostDetailPage() {
 		status: "pending" | "uploading" | "done" | "error";
 		progress: number;
 		error: string | null;
+		recoverable: boolean;
 	};
+
+	const [attachments, setAttachments] = useState<AttachmentRecord[]>(data.attachments);
+	const [comments, setComments] = useState<CommentItem[]>(data.comments);
 
 	const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 	const [queue, setQueue] = useState<UploadItem[]>([]);
@@ -289,16 +425,17 @@ export default function PostDetailPage() {
 	const [globalError, setGlobalError] = useState<string | null>(null);
 	const [isDragging, setIsDragging] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	const queueRef = useRef<UploadItem[]>([]);
 
 	const remainingSlots = useMemo(() => {
-		const existing = data.attachments.length;
+		const existing = attachments.length;
 		const uploading = queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
 		return Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_POST - existing - uploading);
-	}, [data.attachments.length, queue]);
+	}, [attachments.length, queue]);
 
 	const existingBytes = useMemo(() => {
-		return data.attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
-	}, [data.attachments]);
+		return attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
+	}, [attachments]);
 
 	const uploadingBytes = useMemo(() => {
 		return queue
@@ -422,11 +559,145 @@ export default function PostDetailPage() {
 	}
 
 	useEffect(() => {
+		setAttachments(data.attachments);
+		setComments(data.comments);
 		setSelectedFiles([]);
 		setQueue([]);
 		setBusy(false);
 		setGlobalError(null);
-	}, [data.post.id]);
+	}, [data.comments, data.post.id, data.attachments]);
+
+	useEffect(() => {
+		queueRef.current = queue;
+	}, [queue]);
+
+	function normalizeUploadError(error: unknown) {
+		if (isLikelyNetworkError(error)) {
+			return { message: "网络错误，请检查网络后重试", recoverable: true };
+		}
+		const message = error instanceof Error ? String(error.message || "上传失败") : "上传失败";
+		const lower = message.toLowerCase();
+		const recoverable =
+			message.includes("请稍后重试") ||
+			message.includes("超时") ||
+			lower.includes("timeout") ||
+			lower.includes("failed to fetch") ||
+			lower.includes("network");
+		return { message, recoverable };
+	}
+
+	async function deletePostAttachments(ids: number[]) {
+		if (!canManageAttachments || ids.length === 0) return;
+		const names = attachments.filter((a) => ids.includes(a.id)).map((a) => a.filename);
+		const ok = window.confirm(
+			ids.length === 1
+				? `确认删除附件吗？\n\n文件：${names[0] || "(未知文件)"}`
+				: `确认删除所选 ${ids.length} 个附件吗？`,
+		);
+		if (!ok) return;
+		setGlobalError(null);
+		setDeletingPostAttachmentIds((prev) => {
+			const next = { ...prev };
+			for (const id of ids) next[id] = true;
+			return next;
+		});
+		const form = new FormData();
+		form.append("intent", "deletePostAttachments");
+		for (const id of ids) form.append("attachmentId", String(id));
+		try {
+			const res = await fetch(`${window.location.pathname}${window.location.search}`, {
+				method: "POST",
+				headers: { Accept: "application/json" },
+				body: form,
+			});
+			const data = (await res.json()) as any;
+			if (!res.ok || !data?.ok) {
+				throw new Error(String(data?.error || "删除失败"));
+			}
+			const deletedIds = Array.isArray(data.deletedIds) ? (data.deletedIds as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0) : [];
+			setAttachments((prev) => prev.filter((a) => !deletedIds.includes(a.id)));
+			setSelectedAttachmentIds((prev) => prev.filter((id) => !deletedIds.includes(id)));
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "删除失败");
+		} finally {
+			setDeletingPostAttachmentIds((prev) => {
+				const next = { ...prev };
+				for (const id of ids) delete next[id];
+				return next;
+			});
+		}
+	}
+
+	async function deleteCommentAttachments(commentId: number, ids: number[]) {
+		if (!data.user || ids.length === 0 || isBanned) return;
+		const comment = comments.find((c) => c.id === commentId);
+		if (!comment || comment.authorId !== data.user.id) return;
+		const names = comment.attachments.filter((a) => ids.includes(a.id)).map((a) => a.filename);
+		const ok = window.confirm(
+			ids.length === 1
+				? `确认删除附件吗？\n\n文件：${names[0] || "(未知文件)"}`
+				: `确认删除所选 ${ids.length} 个附件吗？`,
+		);
+		if (!ok) return;
+		setGlobalError(null);
+		setDeletingCommentAttachmentIds((prev) => {
+			const next = { ...prev };
+			for (const id of ids) next[id] = true;
+			return next;
+		});
+		const form = new FormData();
+		form.append("intent", "deleteCommentAttachments");
+		form.append("commentId", String(commentId));
+		for (const id of ids) form.append("attachmentId", String(id));
+		try {
+			const res = await fetch(`${window.location.pathname}${window.location.search}`, {
+				method: "POST",
+				headers: { Accept: "application/json" },
+				body: form,
+			});
+			const data = (await res.json()) as any;
+			if (!res.ok || !data?.ok) {
+				throw new Error(String(data?.error || "删除失败"));
+			}
+			const deletedIds = Array.isArray(data.deletedIds) ? (data.deletedIds as any[]).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0) : [];
+			setComments((prev) =>
+				prev.map((c) =>
+					c.id === commentId
+						? { ...c, attachments: c.attachments.filter((a) => !deletedIds.includes(a.id)) }
+						: c,
+				),
+			);
+			setCommentSelectedAttachmentIds((prev) => {
+				const current = prev[commentId] || [];
+				return { ...prev, [commentId]: current.filter((id) => !deletedIds.includes(id)) };
+			});
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "删除失败");
+		} finally {
+			setDeletingCommentAttachmentIds((prev) => {
+				const next = { ...prev };
+				for (const id of ids) delete next[id];
+				return next;
+			});
+		}
+	}
+
+	const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<number[]>([]);
+	const [commentSelectedAttachmentIds, setCommentSelectedAttachmentIds] = useState<Record<number, number[]>>({});
+	const [deletingPostAttachmentIds, setDeletingPostAttachmentIds] = useState<Record<number, boolean>>({});
+	const [deletingCommentAttachmentIds, setDeletingCommentAttachmentIds] = useState<Record<number, boolean>>({});
+
+	function toggleSelectedAttachment(id: number) {
+		setSelectedAttachmentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+	}
+
+	function toggleSelectedCommentAttachment(commentId: number, attachmentId: number) {
+		setCommentSelectedAttachmentIds((prev) => {
+			const current = prev[commentId] || [];
+			const next = current.includes(attachmentId) ? current.filter((x) => x !== attachmentId) : [...current, attachmentId];
+			return { ...prev, [commentId]: next };
+		});
+	}
 
 	async function requestDownload(attachmentId: number) {
 		setGlobalError(null);
@@ -472,12 +743,114 @@ export default function PostDetailPage() {
 	};
 
 	const [commentUploads, setCommentUploads] = useState<Record<number, CommentUploadState>>({});
+	const commentUploadsRef = useRef<Record<number, CommentUploadState>>({});
 
 	function updateCommentUploads(commentId: number, updater: (current: CommentUploadState) => CommentUploadState) {
 		setCommentUploads((prev) => {
 			const current = prev[commentId] || { selectedFiles: [], queue: [], busy: false, error: null };
 			return { ...prev, [commentId]: updater(current) };
 		});
+	}
+
+	useEffect(() => {
+		commentUploadsRef.current = commentUploads;
+	}, [commentUploads]);
+
+	async function retryUploadItem(itemId: string) {
+		if (!canUpload || busy) return;
+		const item = queueRef.current.find((q) => q.id === itemId);
+		if (!item || item.status !== "error") return;
+		setGlobalError(null);
+		setBusy(true);
+		setQueue((prev) =>
+			prev.map((q) => (q.id === itemId ? { ...q, status: "uploading", progress: 0, error: null, recoverable: false } : q)),
+		);
+		try {
+			const localError = validateLocal(item.file);
+			if (localError) {
+				throw new Error(localError);
+			}
+			const init = await initiateUpload(data.post.id, item.file);
+			if (init.mode === "single") {
+				await uploadSingle(init.uploadRecordId, item.file);
+				setQueue((prev) => prev.map((q) => (q.id === itemId ? { ...q, progress: 1 } : q)));
+			} else {
+				const partSize = init.partSizeBytes || attachmentLimits.PART_SIZE_BYTES;
+				await uploadMultipart(init.uploadRecordId, item.file, partSize, (p) => {
+					setQueue((prev) => prev.map((q) => (q.id === itemId ? { ...q, progress: p } : q)));
+				});
+			}
+			const nextQueue = queueRef.current.map((q) => (q.id === itemId ? { ...q, status: "done", progress: 1, error: null } : q));
+			setQueue((prev) => prev.map((q) => (q.id === itemId ? { ...q, status: "done", progress: 1, error: null } : q)));
+			if (nextQueue.length > 0 && nextQueue.every((q) => q.status === "done")) {
+				window.location.reload();
+			}
+		} catch (e) {
+			const normalized = normalizeUploadError(e);
+			setQueue((prev) =>
+				prev.map((q) =>
+					q.id === itemId
+						? { ...q, status: "error", progress: q.progress, error: normalized.message, recoverable: normalized.recoverable }
+						: q,
+				),
+			);
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	async function retryCommentUploadItem(commentId: number, itemId: string) {
+		const current = commentUploadsRef.current[commentId];
+		if (!current || current.busy) return;
+		const item = current.queue.find((q) => q.id === itemId);
+		if (!item || item.status !== "error") return;
+		updateCommentUploads(commentId, (c) => ({ ...c, error: null, busy: true }));
+		updateCommentUploads(commentId, (c) => ({
+			...c,
+			queue: c.queue.map((q) => (q.id === itemId ? { ...q, status: "uploading", progress: 0, error: null, recoverable: false } : q)),
+		}));
+		try {
+			const localError = validateLocal(item.file);
+			if (localError) {
+				throw new Error(localError);
+			}
+			const init = await initiateCommentUpload(commentId, item.file);
+			if (init.mode === "single") {
+				await uploadCommentSingle(init.uploadRecordId, item.file);
+				updateCommentUploads(commentId, (c) => ({
+					...c,
+					queue: c.queue.map((q) => (q.id === itemId ? { ...q, progress: 1 } : q)),
+				}));
+			} else {
+				const partSize = init.partSizeBytes || attachmentLimits.PART_SIZE_BYTES;
+				await uploadCommentMultipart(init.uploadRecordId, item.file, partSize, (p) => {
+					updateCommentUploads(commentId, (c) => ({
+						...c,
+						queue: c.queue.map((q) => (q.id === itemId ? { ...q, progress: p } : q)),
+					}));
+				});
+			}
+			const nextQueue = (commentUploadsRef.current[commentId]?.queue || []).map((q) =>
+				q.id === itemId ? { ...q, status: "done", progress: 1, error: null } : q,
+			);
+			updateCommentUploads(commentId, (c) => ({
+				...c,
+				queue: c.queue.map((q) => (q.id === itemId ? { ...q, status: "done", progress: 1, error: null } : q)),
+			}));
+			if (nextQueue.length > 0 && nextQueue.every((q) => q.status === "done")) {
+				window.location.reload();
+			}
+		} catch (e) {
+			const normalized = normalizeUploadError(e);
+			updateCommentUploads(commentId, (c) => ({
+				...c,
+				queue: c.queue.map((q) =>
+					q.id === itemId ? { ...q, status: "error", error: normalized.message, recoverable: normalized.recoverable } : q,
+				),
+			}));
+		} finally {
+			updateCommentUploads(commentId, (c) => ({ ...c, busy: false }));
+		}
 	}
 
 	async function initiateCommentUpload(commentId: number, file: File) {
@@ -595,8 +968,10 @@ export default function PostDetailPage() {
 			status: "pending",
 			progress: 0,
 			error: null,
+			recoverable: false,
 		}));
 		updateCommentUploads(commentId, (c) => ({ ...c, queue: items, busy: true, error: null }));
+		let hadError = false;
 		for (const item of items) {
 			updateCommentUploads(commentId, (c) => ({
 				...c,
@@ -628,15 +1003,20 @@ export default function PostDetailPage() {
 					queue: c.queue.map((q) => (q.id === item.id ? { ...q, status: "done", progress: 1 } : q)),
 				}));
 			} catch (e) {
-				const message = e instanceof Error ? e.message : "上传失败";
+				hadError = true;
+				const normalized = normalizeUploadError(e);
 				updateCommentUploads(commentId, (c) => ({
 					...c,
-					queue: c.queue.map((q) => (q.id === item.id ? { ...q, status: "error", error: message } : q)),
+					queue: c.queue.map((q) =>
+						q.id === item.id ? { ...q, status: "error", error: normalized.message, recoverable: normalized.recoverable } : q,
+					),
 				}));
 			}
 		}
 		updateCommentUploads(commentId, (c) => ({ ...c, busy: false, selectedFiles: [] }));
-		window.location.reload();
+		if (!hadError) {
+			window.location.reload();
+		}
 	}
 
 	async function initiateUpload(postId: number, file: File) {
@@ -753,9 +1133,11 @@ export default function PostDetailPage() {
 			status: "pending",
 			progress: 0,
 			error: null,
+			recoverable: false,
 		}));
 		setQueue(items);
 		setBusy(true);
+		let hadError = false;
 		for (const item of items) {
 			setQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "uploading", progress: 0 } : q)));
 			try {
@@ -775,13 +1157,20 @@ export default function PostDetailPage() {
 				}
 				setQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "done", progress: 1 } : q)));
 			} catch (e) {
-				const message = e instanceof Error ? e.message : "上传失败";
-				setQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, status: "error", error: message } : q)));
+				hadError = true;
+				const normalized = normalizeUploadError(e);
+				setQueue((prev) =>
+					prev.map((q) =>
+						q.id === item.id ? { ...q, status: "error", error: normalized.message, recoverable: normalized.recoverable } : q,
+					),
+				);
 			}
 		}
 		setBusy(false);
 		setSelectedFiles([]);
-		window.location.reload();
+		if (!hadError) {
+			window.location.reload();
+		}
 	}
 
 	return (
@@ -897,51 +1286,107 @@ export default function PostDetailPage() {
 					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-								附件（{data.attachments.length} / {attachmentLimits.MAX_ATTACHMENTS_PER_POST}）
+								附件（{attachments.length} / {attachmentLimits.MAX_ATTACHMENTS_PER_POST}）
 							</h2>
 							<span className="text-xs text-gray-500 dark:text-gray-400">
 								单附件大小：{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(attachmentLimits.MAX_FILE_SIZE_BYTES)}
 							</span>
 						</div>
-						{data.attachments.length === 0 ? (
+						{attachments.length === 0 ? (
 							<p className="text-sm text-gray-600 dark:text-gray-300">暂无附件。</p>
 						) : (
-							<ul className="space-y-2">
-								{data.attachments.map((a) => (
-									<li
-										key={a.id}
-										className="flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-sm dark:border-gray-700"
-									>
-										<div className="min-w-0">
-											<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
-											<div className="text-xs text-gray-500 dark:text-gray-400">
-												{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
-											</div>
-										</div>
-										{data.user ? (
+							<div className="space-y-3">
+								{canManageAttachments ? (
+									<div className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-gray-700 dark:bg-gray-900/30">
+										<div className="flex items-center gap-3">
 											<button
 												type="button"
-												onClick={() => requestDownload(a.id)}
-												disabled={isBanned}
-												className={
-													isBanned
-														? "cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-													: "rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
-												}
-											>
-												下载
-											</button>
-										) : (
-											<a
-												href="/login"
-												className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
-											>
-												登录后下载
-											</a>
-										)}
-									</li>
-								))}
-							</ul>
+												onClick={() => {
+													if (selectedAttachmentIds.length === attachments.length) {
+														setSelectedAttachmentIds([]);
+													} else {
+														setSelectedAttachmentIds(attachments.map((a) => a.id));
+													}
+											}}
+											className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-900 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
+										>
+											{selectedAttachmentIds.length === attachments.length ? "清空选择" : "全选"}
+										</button>
+										<span className="text-gray-600 dark:text-gray-300">已选 {selectedAttachmentIds.length} 个</span>
+									</div>
+									<button
+										type="button"
+										onClick={() => deletePostAttachments(selectedAttachmentIds)}
+										disabled={selectedAttachmentIds.length === 0}
+										className="rounded bg-red-600 px-3 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
+									>
+										删除所选
+									</button>
+								</div>
+								) : null}
+								<ul className="space-y-2">
+									{attachments.map((a) => (
+										<li
+											key={a.id}
+											className={
+												deletingPostAttachmentIds[a.id]
+													? "flex items-start justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-sm opacity-60 transition-opacity dark:border-gray-700"
+													: "flex items-start justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-sm transition-opacity dark:border-gray-700"
+											}
+										>
+											<div className="flex min-w-0 items-start gap-3">
+												{canManageAttachments ? (
+													<input
+														type="checkbox"
+														checked={selectedAttachmentIds.includes(a.id)}
+														onChange={() => toggleSelectedAttachment(a.id)}
+														className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600"
+													/>
+												) : null}
+												<div className="min-w-0">
+													<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
+													<div className="text-xs text-gray-500 dark:text-gray-400">
+														{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
+													</div>
+												</div>
+											</div>
+											<div className="flex shrink-0 items-center gap-2">
+												{data.user ? (
+													<button
+														type="button"
+														onClick={() => requestDownload(a.id)}
+														disabled={isBanned}
+													className={
+														isBanned
+															? "cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+															: "rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+													}
+												>
+													下载
+												</button>
+												) : (
+													<a
+														href="/login"
+														className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+													>
+														登录后下载
+													</a>
+												)}
+												{canManageAttachments ? (
+													<button
+														type="button"
+														onClick={() => deletePostAttachments([a.id])}
+													disabled={Boolean(deletingPostAttachmentIds[a.id])}
+													className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-70"
+												>
+													{deletingPostAttachmentIds[a.id] ? "删除中..." : "删除"}
+												</button>
+											) : null}
+											</div>
+										</li>
+									))}
+								</ul>
+							</div>
 						)}
 
 					{canManageAttachments ? (
@@ -1061,7 +1506,10 @@ export default function PostDetailPage() {
 									{effectiveSelectedFiles.map((f) => (
 										<li key={f.name} className="flex items-center justify-between gap-3">
 											<span className="min-w-0 truncate">{f.name}</span>
-											<span className="shrink-0 text-gray-500 dark:text-gray-400">{formatSize(f.size)}</span>
+											<span className="shrink-0 text-gray-500 dark:text-gray-400">
+												{formatSize(f.size)}
+												{f.type ? ` · ${f.type}` : ""}
+											</span>
 										</li>
 									))}
 								</ul>
@@ -1081,41 +1529,51 @@ export default function PostDetailPage() {
 									</button>
 								</div>
 
-									{queue.length > 0 ? (
-										<ul className="mt-2 space-y-2">
-											{queue.map((q) => (
-												<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-sm dark:bg-gray-900/30">
-												<div className="flex items-center justify-between gap-3">
-													<span className="truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
-													<span className="text-xs text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
-												</div>
-												<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
-													<div
-														className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
-														style={{ width: `${Math.round(q.progress * 100)}%` }}
-													/>
-												</div>
-												<div className="mt-1 flex items-center justify-between text-xs">
-													<span className="text-gray-600 dark:text-gray-300">
-														{q.status === "pending"
-															? "等待上传"
-															: q.status === "uploading"
-																? "上传中"
-																: q.status === "done"
-																	? "已完成"
-																	: "失败"}
-													</span>
-													<span className="text-gray-500 dark:text-gray-400">
-														{Math.round(q.progress * 100)}%
-													</span>
-												</div>
-												{q.error ? (
-													<div className="mt-1 text-xs text-red-600 dark:text-red-300">{q.error}</div>
+						{queue.length > 0 ? (
+							<ul className="mt-2 space-y-2">
+								{queue.map((q) => (
+									<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-sm dark:bg-gray-900/30">
+										<div className="flex items-center justify-between gap-3">
+											<span className="truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
+											<span className="text-xs text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
+										</div>
+										<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
+											<div
+												className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
+												style={{ width: `${Math.round(q.progress * 100)}%` }}
+											/>
+										</div>
+										<div className="mt-1 flex items-center justify-between text-xs">
+											<span className="text-gray-600 dark:text-gray-300">
+												{q.status === "pending"
+													? "等待上传"
+													: q.status === "uploading"
+														? "上传中"
+													: q.status === "done"
+														? "已完成"
+														: "失败"}
+											</span>
+											<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
+										</div>
+										{q.error ? (
+											<div className="mt-2 flex items-start justify-between gap-3 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+												<span className="min-w-0 flex-1 break-words">{q.error}</span>
+												{q.status === "error" && q.recoverable ? (
+													<button
+														type="button"
+														onClick={() => retryUploadItem(q.id)}
+														disabled={busy}
+														className="shrink-0 rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-70"
+													>
+														重试
+													</button>
 												) : null}
-											</li>
-											))}
-										</ul>
-									) : null}
+											</div>
+										) : null}
+									</li>
+								))}
+							</ul>
+						) : null}
 								</div>
 							</div>
 						) : null}
@@ -1124,13 +1582,13 @@ export default function PostDetailPage() {
 						<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
 							评论（{data.commentCount}）
 						</h2>
-						{data.comments.length === 0 ? (
+						{comments.length === 0 ? (
 							<p className="text-sm text-gray-600 dark:text-gray-300">
 								还没有任何评论。
 							</p>
 						) : (
 							<ul className="space-y-4">
-								{data.comments.map((comment, index) => (
+								{comments.map((comment, index) => (
 									<li key={comment.id} className="border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700">
 										<div className="mb-1 flex items-center justify-between">
 											<span className="text-xs text-gray-500 dark:text-gray-400">
@@ -1151,39 +1609,101 @@ export default function PostDetailPage() {
 												{comment.attachments.map((a) => (
 													<li
 														key={a.id}
-														className="flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs dark:border-gray-700"
+														className={
+															deletingCommentAttachmentIds[a.id]
+																? "flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs opacity-60 transition-opacity dark:border-gray-700"
+																: "flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs transition-opacity dark:border-gray-700"
+														}
 													>
-														<div className="min-w-0">
-															<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
-															<div className="text-[11px] text-gray-500 dark:text-gray-400">
-																{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
+														<div className="flex min-w-0 items-start gap-2">
+															{data.user && data.user.id === comment.authorId && !isBanned ? (
+																<input
+																	type="checkbox"
+																	checked={(commentSelectedAttachmentIds[comment.id] || []).includes(a.id)}
+																	onChange={() => toggleSelectedCommentAttachment(comment.id, a.id)}
+																	disabled={Boolean(deletingCommentAttachmentIds[a.id])}
+																	className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600"
+																/>
+															) : null}
+															<div className="min-w-0">
+																<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
+																<div className="text-[11px] text-gray-500 dark:text-gray-400">
+																	{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
+																</div>
 															</div>
 														</div>
 														{data.user ? (
-															<button
-																type="button"
-																onClick={() => requestCommentDownload(a.id)}
-																disabled={isBanned}
-																className={
-																	isBanned
-																		? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-																	: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
-																}
-															>
-																下载
-															</button>
-														) : (
-															<a
-																href="/login"
-																className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
-															>
-																登录后下载
-															</a>
-														)}
-													</li>
-												))}
-											</ul>
-										)}
+															<div className="flex items-center gap-2">
+																<button
+																	type="button"
+																	onClick={() => requestCommentDownload(a.id)}
+																	disabled={isBanned}
+																	className={
+																		isBanned
+																			? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+																			: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+																	}
+																>
+																	下载
+																</button>
+																{data.user.id === comment.authorId && !isBanned ? (
+																	<button
+																		type="button"
+																		onClick={() => deleteCommentAttachments(comment.id, [a.id])}
+																	disabled={Boolean(deletingCommentAttachmentIds[a.id])}
+																	className="rounded bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-70"
+																	>
+																	{deletingCommentAttachmentIds[a.id] ? "删除中..." : "删除"}
+																</button>
+															) : null}
+														</div>
+													) : (
+														<a
+															href="/login"
+															className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+														>
+															登录后下载
+														</a>
+													)}
+												</li>
+											))}
+										</ul>
+									)}
+
+										{data.user && data.user.id === comment.authorId && !isBanned && comment.attachments.length > 0 ? (
+											<div className="mt-2 flex flex-wrap items-center justify-end gap-2 text-xs">
+												<button
+													type="button"
+													onClick={() => {
+														const current = commentSelectedAttachmentIds[comment.id] || [];
+														if (current.length === comment.attachments.length) {
+															setCommentSelectedAttachmentIds((prev) => ({ ...prev, [comment.id]: [] }));
+														} else {
+															setCommentSelectedAttachmentIds((prev) => ({ ...prev, [comment.id]: comment.attachments.map((a) => a.id) }));
+														}
+												}}
+												className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
+											>
+												{(commentSelectedAttachmentIds[comment.id] || []).length === comment.attachments.length ? "清空选择" : "全选"}
+											</button>
+											<button
+												type="button"
+												onClick={() => deleteCommentAttachments(comment.id, commentSelectedAttachmentIds[comment.id] || [])}
+												disabled={(() => {
+													const selected = commentSelectedAttachmentIds[comment.id] || [];
+													if (!selected.length) return true;
+													return selected.some((id) => Boolean(deletingCommentAttachmentIds[id]));
+											})()}
+												className="rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
+											>
+												{(() => {
+													const selected = commentSelectedAttachmentIds[comment.id] || [];
+													const deleting = selected.some((id) => Boolean(deletingCommentAttachmentIds[id]));
+													return deleting ? "删除中..." : "删除所选";
+											})()}
+											</button>
+										</div>
+									) : null}
 
 										{data.user && data.user.id === comment.authorId && !isBanned ? (
 											<div className="mt-3 rounded border border-gray-200 p-3 dark:border-gray-700">
@@ -1211,26 +1731,69 @@ export default function PostDetailPage() {
 														{commentUploads[comment.id]?.busy ? "上传中..." : "开始上传"}
 													</button>
 												</div>
-												<div className="mt-2 flex items-center justify-between gap-3">
-													<input
-														type="file"
-														multiple
-														disabled={Boolean(commentUploads[comment.id]?.busy)}
-														onChange={(e) => {
-															const files = Array.from(e.target.files || []);
-															updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
-															e.currentTarget.value = "";
+													<div className="mt-2 flex items-center justify-between gap-3">
+														<input
+															type="file"
+															multiple
+															disabled={Boolean(commentUploads[comment.id]?.busy)}
+															onChange={(e) => {
+																const files = Array.from(e.target.files || []);
+																updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
+																e.currentTarget.value = "";
 														}}
-														className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
-													/>
-												</div>
-												{commentUploads[comment.id]?.error ? (
-													<div className="mt-2 text-xs text-red-600 dark:text-red-300">{commentUploads[comment.id]?.error}</div>
-												) : null}
-												{commentUploads[comment.id]?.queue?.length ? (
-													<ul className="mt-2 space-y-2">
-														{commentUploads[comment.id].queue.map((q) => (
-															<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-xs dark:bg-gray-900/30">
+															className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
+														/>
+													</div>
+													{(() => {
+														const state = commentUploads[comment.id] || { selectedFiles: [], queue: [], busy: false, error: null };
+														const uploadingCount = state.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
+														const remaining = Math.max(0, attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT - comment.attachments.length - uploadingCount);
+														const effective = state.selectedFiles.slice(0, remaining);
+														const existingBytes = comment.attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
+														const uploadingBytes = state.queue
+															.filter((q) => q.status === "pending" || q.status === "uploading")
+															.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
+														const selectedBytes = effective.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
+														const remainingBytes = Math.max(0, attachmentLimits.MAX_TOTAL_COMMENT_BYTES - existingBytes - uploadingBytes);
+														const overLimit = selectedBytes > remainingBytes;
+														return (
+															<>
+																<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+																	<span>
+																		已选 {formatSize(selectedBytes)} / 剩余 {formatSize(remainingBytes)}
+																	</span>
+																	{state.selectedFiles.length > remaining ? (
+																		<span className="text-amber-700 dark:text-amber-300">
+																			已选择 {state.selectedFiles.length} 个，仅上传前 {remaining} 个
+																		</span>
+																	) : null}
+																	{overLimit ? <span className="text-red-600 dark:text-red-300">已超出 500MB 上限</span> : null}
+																</div>
+																{effective.length > 0 ? (
+																	<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+																		{effective.map((f) => (
+																			<li key={f.name} className="flex items-center justify-between gap-3">
+																				<span className="min-w-0 truncate">{f.name}</span>
+																				<span className="shrink-0 text-gray-500 dark:text-gray-400">
+																					{formatSize(f.size)}
+																					{f.type ? ` · ${f.type}` : ""}
+																				</span>
+																			</li>
+																		))}
+																	</ul>
+																) : null}
+																{commentUploads[comment.id]?.error ? (
+																	<div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+																		{commentUploads[comment.id]?.error}
+																	</div>
+																) : null}
+															</>
+														);
+													})()}
+													{commentUploads[comment.id]?.queue?.length ? (
+														<ul className="mt-2 space-y-2">
+															{commentUploads[comment.id].queue.map((q) => (
+																<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-xs dark:bg-gray-900/30">
 																<div className="flex items-center justify-between gap-3">
 																	<span className="min-w-0 truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
 																	<span className="shrink-0 text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
@@ -1241,7 +1804,7 @@ export default function PostDetailPage() {
 																		style={{ width: `${Math.round(q.progress * 100)}%` }}
 																	/>
 																</div>
-																<div className="mt-1 flex items-center justify-between text-[11px]">
+																	<div className="mt-1 flex items-center justify-between text-[11px]">
 																	<span className="text-gray-600 dark:text-gray-300">
 																		{q.status === "pending"
 																			? "等待上传"
@@ -1253,11 +1816,25 @@ export default function PostDetailPage() {
 																	</span>
 																	<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
 																</div>
-																{q.error ? <div className="mt-1 text-xs text-red-600 dark:text-red-300">{q.error}</div> : null}
-															</li>
-														))}
-													</ul>
-												) : null}
+																	{q.error ? (
+																		<div className="mt-2 flex items-start justify-between gap-3 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+																			<span className="min-w-0 flex-1 break-words">{q.error}</span>
+																			{q.status === "error" && q.recoverable ? (
+																				<button
+																					type="button"
+																					onClick={() => retryCommentUploadItem(comment.id, q.id)}
+																					disabled={Boolean(commentUploads[comment.id]?.busy)}
+																					className="shrink-0 rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-70"
+																				>
+																					重试
+																				</button>
+																			) : null}
+																		</div>
+																	) : null}
+																</li>
+															))}
+														</ul>
+													) : null}
 											</div>
 										) : null}
 									</li>
