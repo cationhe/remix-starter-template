@@ -627,7 +627,7 @@ export default function PostDetailPage() {
 					<input
 						type="file"
 						multiple
-										disabled={busy || remainingSlots <= 0 || uploadsPaused}
+						disabled={busy || remainingSlots <= 0 || uploadsPaused}
 						onChange={(e) => {
 							const files = Array.from(e.target.files || []);
 							setSelectedFiles(files);
@@ -638,15 +638,15 @@ export default function PostDetailPage() {
 										<span className="text-xs text-gray-500 dark:text-gray-400">
 											每帖最多 {attachmentLimits.MAX_ATTACHMENTS_PER_POST} 个附件，大文件将自动分块上传
 										</span>
-						<button
-							type="button"
-							onClick={startUpload}
-										disabled={busy || selectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused}
-										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-									>
-										{busy ? "上传中..." : "开始上传"}
-									</button>
-								</div>
+										<button
+											type="button"
+											onClick={startUpload}
+											disabled={busy || selectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused}
+											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+										>
+											{busy ? "上传中..." : "开始上传"}
+										</button>
+									</div>
 
 									{queue.length > 0 ? (
 										<ul className="mt-2 space-y-2">
