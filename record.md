@@ -1027,7 +1027,6 @@
 
 - GitHub：新增 `record.md` 并提交 `787fd9d`（`docs: add record.md`）。
 
-
 ## 2025-12-21（补充：对话状态确认与记录同步）
 
 ### 本次目标
@@ -1054,3 +1053,9 @@
 ### 部署与验证
 
 - Cloudflare Workers：执行 `npm run deploy` 成功，版本 ID `1ae4c014-394e-4161-b219-d84dfbf02ae2`。
+
+## 2025-12-21（补充：记录推送到 GitHub）
+
+### 发布与同步
+
+- GitHub：已推送 `record.md` 到 `cationhe/remix-starter-template`，提交 `9a9b467`（`docs: update record`）。
