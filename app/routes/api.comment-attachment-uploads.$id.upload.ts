@@ -3,11 +3,11 @@ import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
+	containsEicarBytes,
 	finalizeUploadToCommentAttachment,
 	getAttachmentsBucket,
 	getCommentUploadRecord,
 	validateAttachmentMeta,
-	wrapStreamWithEicarScan,
 } from "~/lib/attachments.server";
 
 type ActionData =
@@ -16,6 +16,11 @@ type ActionData =
 			ok: false;
 			error: string;
 	  };
+
+function formatSafeErrorMessage(message: string) {
+	const clean = String(message || "").replace(/[\r\n\t]+/g, " ").trim();
+	return clean.slice(0, 200) || "上传失败";
+}
 
 function parseId(value: string | undefined) {
 	const id = Number(value);
@@ -71,8 +76,11 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	try {
 		const bucket = getAttachmentsBucket(context);
-		const scannedStream = wrapStreamWithEicarScan(file.stream());
-		await bucket.put(record.r2Key, scannedStream, {
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		if (containsEicarBytes(bytes)) {
+			throw new Error("病毒扫描未通过");
+		}
+		await bucket.put(record.r2Key, bytes, {
 			httpMetadata: { contentType: record.mimeType },
 			customMetadata: {
 				postId: String(record.postId),
@@ -84,6 +92,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		await finalizeUploadToCommentAttachment({ context, uploadRecordId });
 		return json<ActionData>({ ok: true });
 	} catch (error) {
+		const traceId = request.headers.get("cf-ray") || "";
 		try {
 			const bucket = getAttachmentsBucket(context);
 			await bucket.delete(record.r2Key);
@@ -96,13 +105,29 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await execute(db, "DELETE FROM comment_attachments WHERE r2_key = ?", [record.r2Key]);
 		} catch {
 		}
+		console.error("comment_attachment_upload_failed", {
+			uploadRecordId,
+			commentId: record.commentId,
+			r2Key: record.r2Key,
+			traceId,
+			error,
+		});
 		const message = error instanceof Error ? error.message : "";
 		if (message.includes("病毒扫描")) {
-			return json<ActionData>({ ok: false, error: "病毒扫描未通过" }, { status: 400 });
+			return json<ActionData>({ ok: false, error: traceId ? `病毒扫描未通过（追踪ID：${traceId}）` : "病毒扫描未通过" }, { status: 400 });
 		}
 		if (error instanceof Response) {
-			return json<ActionData>({ ok: false, error: await error.text() }, { status: error.status });
+			const text = await error.text();
+			const safe = formatSafeErrorMessage(text);
+			return json<ActionData>(
+				{ ok: false, error: traceId ? `${safe}（追踪ID：${traceId}）` : safe },
+				{ status: error.status },
+			);
 		}
-		return json<ActionData>({ ok: false, error: "上传失败，请稍后重试" }, { status: 500 });
+		const safe = formatSafeErrorMessage(message);
+		return json<ActionData>(
+			{ ok: false, error: traceId ? `${safe}（追踪ID：${traceId}）` : safe },
+			{ status: 500 },
+		);
 	}
 }

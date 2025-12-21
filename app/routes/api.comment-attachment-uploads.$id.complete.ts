@@ -17,6 +17,11 @@ type ActionData =
 			error: string;
 		};
 
+function formatSafeErrorMessage(message: string) {
+	const clean = String(message || "").replace(/[\r\n\t]+/g, " ").trim();
+	return clean.slice(0, 200) || "完成上传失败";
+}
+
 function parsePositiveInt(value: string | undefined) {
 	const num = Number(value);
 	if (!value || Number.isNaN(num) || !Number.isFinite(num) || num <= 0) return null;
@@ -86,9 +91,27 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		return json<ActionData>({ ok: true });
 	} catch (error) {
+		const traceId = request.headers.get("cf-ray") || "";
+		console.error("comment_attachment_complete_failed", {
+			uploadRecordId,
+			commentId: record.commentId,
+			r2Key: record.r2Key,
+			traceId,
+			error,
+		});
 		if (error instanceof Response) {
-			return json<ActionData>({ ok: false, error: await error.text() }, { status: error.status });
+			const text = await error.text();
+			const safe = formatSafeErrorMessage(text);
+			return json<ActionData>(
+				{ ok: false, error: traceId ? `${safe}（追踪ID：${traceId}）` : safe },
+				{ status: error.status },
+			);
 		}
-		return json<ActionData>({ ok: false, error: "完成上传失败" }, { status: 500 });
+		const message = error instanceof Error ? error.message : "";
+		const safe = formatSafeErrorMessage(message);
+		return json<ActionData>(
+			{ ok: false, error: traceId ? `${safe}（追踪ID：${traceId}）` : safe },
+			{ status: 500 },
+		);
 	}
 }
