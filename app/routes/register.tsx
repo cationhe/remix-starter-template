@@ -42,8 +42,12 @@ function isTurnstileEnforced(context: any, request: Request) {
 	const e2e = String(env?.E2E || "") === "1";
 	const byHeader = request.headers.get("x-e2e-turnstile-enforce") === "1";
 	const byVar = String(env?.TURNSTILE_ENFORCE || "") === "1";
+	const siteKey = typeof env.TURNSTILE_SITE_KEY === "string" ? env.TURNSTILE_SITE_KEY.trim() : "";
+	const secretKey = typeof env.TURNSTILE_SECRET_KEY === "string" ? env.TURNSTILE_SECRET_KEY.trim() : "";
+	const configured = Boolean(siteKey && secretKey);
 	if (e2e) return byHeader || byVar;
 	if (byVar) return true;
+	if (!configured) return false;
 	let hostname = "";
 	try {
 		hostname = new URL(request.url).hostname;
