@@ -16,6 +16,7 @@ import {
 	removeAllAttachmentUploadsForUploader,
 	removeAllAttachmentsForPost,
 	removeAllAttachmentsForUploader,
+	removeAllCommentAttachmentUploadsForComments,
 	removeAllCommentAttachmentUploadsForUploader,
 	removeAllCommentAttachmentsForComments,
 	removeAllCommentAttachmentsForPost,
@@ -557,6 +558,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				[targetUserId],
 			);
 			const commentIds = commentRows.map((c) => c.id);
+			await removeAllCommentAttachmentUploadsForComments(context, commentIds);
 			await removeAllCommentAttachmentsForComments(context, commentIds);
 			await execute(db, "DELETE FROM comments WHERE author_id = ?", [targetUserId]);
 			await execute(db, "DELETE FROM post_likes WHERE user_id = ?", [targetUserId]);

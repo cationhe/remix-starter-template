@@ -861,6 +861,52 @@ export async function removeAllAttachmentUploadsForUploader(context: AppLoadCont
 	await execute(db, `DELETE FROM attachment_uploads WHERE id IN (${placeholders})`, ids);
 }
 
+export async function removeAllCommentAttachmentUploadsForComments(context: AppLoadContext, commentIds: number[]) {
+	const ids = commentIds
+		.map((n) => Number(n))
+		.filter((n) => Number.isFinite(n) && n > 0)
+		.map((n) => Math.floor(n));
+	const uniqueIds = Array.from(new Set(ids));
+	if (uniqueIds.length === 0) return;
+	const db = getDBFromContext(context);
+	const placeholders = uniqueIds.map(() => "?").join(",");
+	const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
+		db,
+		`SELECT id as id, r2_key as r2Key, upload_id as uploadId FROM comment_attachment_uploads WHERE comment_id IN (${placeholders})`,
+		uniqueIds,
+	);
+	if (rows.length === 0) return;
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	for (const row of rows) {
+		try {
+			if (bucket && row.uploadId && row.uploadId !== "single") {
+				const upload = bucket.resumeMultipartUpload(row.r2Key, row.uploadId);
+				await upload.abort();
+			}
+		} catch {
+		}
+		try {
+			if (bucket) {
+				await bucket.delete(row.r2Key);
+			}
+		} catch {
+		}
+	}
+	const uploadIds = rows.map((r) => r.id);
+	const uploadPlaceholders = uploadIds.map(() => "?").join(",");
+	await execute(
+		db,
+		`DELETE FROM comment_attachment_upload_parts WHERE upload_record_id IN (${uploadPlaceholders})`,
+		uploadIds,
+	);
+	await execute(db, `DELETE FROM comment_attachment_uploads WHERE id IN (${uploadPlaceholders})`, uploadIds);
+}
+
 export async function removeAllCommentAttachmentUploadsForUploader(context: AppLoadContext, uploaderId: number) {
 	const db = getDBFromContext(context);
 	const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
