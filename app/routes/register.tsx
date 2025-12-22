@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
+import { useEffect, useState } from "react";
 import {
 	consumeRateLimit,
 	findUserByEmail,
@@ -9,6 +10,7 @@ import {
 	promoteToSuperadminIfMatch,
 	registerUser,
 } from "~/lib/auth.server";
+import { execute, getDBFromContext } from "~/lib/d1.server";
 import { commitSession, getSession } from "~/lib/session.server";
 
 type ActionData = {
@@ -21,9 +23,110 @@ type ActionData = {
 	formError?: string;
 };
 
+type LoaderData = {
+	registrationPaused: boolean;
+	turnstileSiteKey: string | null;
+	turnstileEnabled: boolean;
+};
+
+function getTurnstileConfig(context: any) {
+	const env = (context as any).cloudflare.env as any;
+	const siteKey = typeof env.TURNSTILE_SITE_KEY === "string" ? env.TURNSTILE_SITE_KEY.trim() : "";
+	const secretKey = typeof env.TURNSTILE_SECRET_KEY === "string" ? env.TURNSTILE_SECRET_KEY.trim() : "";
+	return { siteKey: siteKey || null, enabled: Boolean(siteKey && secretKey) };
+}
+
+type TurnstileVerifyResponse = {
+	success: boolean;
+	"error-codes"?: string[];
+	challenge_ts?: string;
+	hostname?: string;
+	action?: string;
+	cdata?: string;
+};
+
+async function verifyTurnstileToken(args: {
+	request: Request;
+	context: ActionFunctionArgs["context"];
+	responseToken: string;
+	flow: "login" | "register";
+	metadata: Record<string, unknown>;
+}) {
+	const env = (args.context as any).cloudflare.env as any;
+	const siteKey = typeof env.TURNSTILE_SITE_KEY === "string" ? env.TURNSTILE_SITE_KEY.trim() : "";
+	const secretKey = typeof env.TURNSTILE_SECRET_KEY === "string" ? env.TURNSTILE_SECRET_KEY.trim() : "";
+	const enabled = Boolean(siteKey && secretKey);
+	if (!enabled) return { enabled: false, ok: true } as const;
+
+	const ip = getClientIp(args.request);
+	const userAgent = args.request.headers.get("User-Agent");
+	const now = Date.now();
+	const db = getDBFromContext(args.context);
+
+	if (!args.responseToken) {
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[0, "turnstile_missing_token", ip, userAgent, JSON.stringify({ flow: args.flow, ...args.metadata }), now],
+			);
+		} catch {
+		}
+		return { enabled: true, ok: false, message: "请先完成人机验证" } as const;
+	}
+
+	let data: TurnstileVerifyResponse | null = null;
+	try {
+		const body = new URLSearchParams();
+		body.set("secret", secretKey);
+		body.set("response", args.responseToken);
+		if (ip) body.set("remoteip", ip);
+		const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+			},
+			body,
+		});
+		data = (await resp.json()) as TurnstileVerifyResponse;
+	} catch {
+		data = null;
+	}
+
+	if (!data?.success) {
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					0,
+					"turnstile_verify_failed",
+					ip,
+					userAgent,
+					JSON.stringify({
+						flow: args.flow,
+						errorCodes: Array.isArray(data?.["error-codes"]) ? data?.["error-codes"] : [],
+						...args.metadata,
+					}),
+					now,
+				],
+			);
+		} catch {
+		}
+		return { enabled: true, ok: false, message: "人机验证失败，请重试" } as const;
+	}
+
+	return { enabled: true, ok: true } as const;
+}
+
 export async function loader({ context }: LoaderFunctionArgs) {
 	const registrationPaused = await getRegistrationPaused(context);
-	return json({ registrationPaused });
+	const cfg = getTurnstileConfig(context);
+	return json<LoaderData>({
+		registrationPaused,
+		turnstileSiteKey: cfg.siteKey,
+		turnstileEnabled: cfg.enabled,
+	});
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -40,6 +143,18 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const ip = getClientIp(request);
 	const normalizedEmail = email.trim().toLowerCase();
 	const now = Date.now();
+
+	const turnstileToken = String(formData.get("cf-turnstile-response") || "").trim();
+	const turnstile = await verifyTurnstileToken({
+		request,
+		context,
+		responseToken: turnstileToken,
+		flow: "register",
+		metadata: { email: normalizedEmail },
+	});
+	if (turnstile.enabled && !turnstile.ok) {
+		return json<ActionData>({ formError: turnstile.message }, { status: 400 });
+	}
 
 	const fieldErrors: ActionData["fieldErrors"] = {};
 	if (!email) {
@@ -121,13 +236,38 @@ export default function Register() {
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
+	const [turnstileToken, setTurnstileToken] = useState("");
 	const registrationPaused = loaderData.registrationPaused;
+	const turnstileEnabled = loaderData.turnstileEnabled;
+	const turnstileSiteKey = loaderData.turnstileSiteKey;
+
+	useEffect(() => {
+		if (!turnstileEnabled) return;
+		(window as any).__turnstileRegisterSuccess = (token: string) => {
+			setTurnstileToken(String(token || ""));
+		};
+		(window as any).__turnstileRegisterExpired = () => {
+			setTurnstileToken("");
+		};
+		return () => {
+			delete (window as any).__turnstileRegisterSuccess;
+			delete (window as any).__turnstileRegisterExpired;
+		};
+	}, [turnstileEnabled]);
+
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900">
 			<div className="w-full max-w-md rounded-xl bg-white p-8 shadow dark:bg-gray-800">
 				<h1 className="mb-6 text-center text-2xl font-semibold text-gray-900 dark:text-gray-100">
 					注册账号
 				</h1>
+				{turnstileEnabled ? (
+					<script
+						src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+						async
+						defer
+					/>
+				) : null}
 				{registrationPaused ? (
 					<div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
 						<div className="font-medium">当前暂停注册</div>
@@ -217,9 +357,26 @@ export default function Register() {
 					{actionData?.formError ? (
 						<p className="text-sm text-red-600">{actionData.formError}</p>
 					) : null}
+					{turnstileEnabled ? (
+						<div className="space-y-2">
+							<div className="flex justify-center">
+								<div
+									className="cf-turnstile"
+									data-sitekey={turnstileSiteKey ?? ""}
+									data-theme="auto"
+									data-callback="__turnstileRegisterSuccess"
+									data-expired-callback="__turnstileRegisterExpired"
+									data-error-callback="__turnstileRegisterExpired"
+								/>
+							</div>
+							{turnstileToken ? null : (
+								<p className="text-center text-xs text-gray-600 dark:text-gray-300">请完成人机验证后继续</p>
+							)}
+						</div>
+					) : null}
 					<button
 						type="submit"
-						disabled={isSubmitting}
+						disabled={isSubmitting || (turnstileEnabled && !turnstileToken)}
 						className="flex w-full items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
 					>
 						{isSubmitting ? "注册中..." : "注册"}
