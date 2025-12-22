@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, Link, useActionData, useLoaderData } from "@remix-run/react";
+import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { useEffect, useMemo, useState } from "react";
 import {
 	assertAdmin,
@@ -618,6 +618,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 export default function AdminUsersPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
+	const navigation = useNavigation();
 	const [query, setQuery] = useState("");
 	const [filterMode, setFilterMode] = useState<"all" | "banned" | "deleted">("all");
 	const [now, setNow] = useState(() => Date.now());
@@ -625,11 +626,25 @@ export default function AdminUsersPage() {
 	const [dialogIntent, setDialogIntent] = useState<"deleteBannedUser" | "restoreUser">("deleteBannedUser");
 	const [verifyPassword, setVerifyPassword] = useState("");
 	const [deleteMode, setDeleteMode] = useState<"soft" | "hard">("soft");
+	const [dialogSubmitting, setDialogSubmitting] = useState(false);
 
 	useEffect(() => {
 		const id = window.setInterval(() => setNow(Date.now()), 1000);
 		return () => window.clearInterval(id);
 	}, []);
+
+	useEffect(() => {
+		if (!dialogSubmitting) return;
+		if (navigation.state !== "idle") return;
+		if (actionData?.formError) {
+			setDialogSubmitting(false);
+			return;
+		}
+		setDialogUser(null);
+		setVerifyPassword("");
+		setDeleteMode("soft");
+		setDialogSubmitting(false);
+	}, [actionData?.formError, dialogSubmitting, navigation.state]);
 
 	const filtered = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -929,7 +944,11 @@ export default function AdminUsersPage() {
 								</div>
 								<button
 									type="button"
-									onClick={() => setDialogUser(null)}
+									onClick={() => {
+										if (dialogSubmitting) return;
+										setDialogUser(null);
+									}}
+									disabled={dialogSubmitting}
 									className="rounded px-2 py-1 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
 								>
 									关闭
@@ -953,6 +972,7 @@ export default function AdminUsersPage() {
 										e.preventDefault();
 										return;
 									}
+									setDialogSubmitting(true);
 								}}
 								className="mt-4 flex flex-col gap-4"
 							>
@@ -1001,20 +1021,29 @@ export default function AdminUsersPage() {
 								<div className="flex items-center justify-end gap-2">
 									<button
 										type="button"
-										onClick={() => setDialogUser(null)}
+										onClick={() => {
+											if (dialogSubmitting) return;
+											setDialogUser(null);
+									}}
+										disabled={dialogSubmitting}
 										className="rounded border border-gray-300 px-3 py-2 text-sm text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
 									>
 										取消
 									</button>
 									<button
 										type="submit"
+										disabled={dialogSubmitting && navigation.state !== "idle"}
 										className={
 											dialogIntent === "deleteBannedUser"
 												? "rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700"
 												: "rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
 										}
 									>
-										{dialogIntent === "deleteBannedUser" ? "确认执行" : "确认恢复"}
+										{dialogSubmitting && navigation.state !== "idle"
+											? "处理中..."
+											: dialogIntent === "deleteBannedUser"
+												? "确认执行"
+												: "确认恢复"}
 									</button>
 								</div>
 							</Form>
