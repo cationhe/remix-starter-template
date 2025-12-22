@@ -750,6 +750,152 @@ export async function removeAllAttachmentsForPost(context: AppLoadContext, postI
 	}
 }
 
+export async function removeAllAttachmentsForUploader(context: AppLoadContext, uploaderId: number) {
+	const db = getDBFromContext(context);
+	const rows = await queryAll<{ r2Key: string }>(
+		db,
+		"SELECT r2_key as r2Key FROM attachments WHERE uploader_id = ?",
+		[uploaderId],
+	);
+	await execute(db, "DELETE FROM attachments WHERE uploader_id = ?", [uploaderId]);
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	if (!bucket) return;
+	for (const item of rows) {
+		try {
+			await bucket.delete(item.r2Key);
+		} catch {
+		}
+	}
+}
+
+export async function removeAllCommentAttachmentsForUploader(context: AppLoadContext, uploaderId: number) {
+	const db = getDBFromContext(context);
+	const rows = await queryAll<{ r2Key: string }>(
+		db,
+		"SELECT r2_key as r2Key FROM comment_attachments WHERE uploader_id = ?",
+		[uploaderId],
+	);
+	await execute(db, "DELETE FROM comment_attachments WHERE uploader_id = ?", [uploaderId]);
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	if (!bucket) return;
+	for (const item of rows) {
+		try {
+			await bucket.delete(item.r2Key);
+		} catch {
+		}
+	}
+}
+
+export async function removeAllCommentAttachmentsForComments(context: AppLoadContext, commentIds: number[]) {
+	const ids = commentIds
+		.map((n) => Number(n))
+		.filter((n) => Number.isFinite(n) && n > 0)
+		.map((n) => Math.floor(n));
+	const uniqueIds = Array.from(new Set(ids));
+	if (uniqueIds.length === 0) return;
+	const placeholders = uniqueIds.map(() => "?").join(",");
+	const db = getDBFromContext(context);
+	const rows = await queryAll<{ r2Key: string }>(
+		db,
+		`SELECT r2_key as r2Key FROM comment_attachments WHERE comment_id IN (${placeholders})`,
+		uniqueIds,
+	);
+	await execute(db, `DELETE FROM comment_attachments WHERE comment_id IN (${placeholders})`, uniqueIds);
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	if (!bucket) return;
+	for (const item of rows) {
+		try {
+			await bucket.delete(item.r2Key);
+		} catch {
+		}
+	}
+}
+
+export async function removeAllAttachmentUploadsForUploader(context: AppLoadContext, uploaderId: number) {
+	const db = getDBFromContext(context);
+	const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
+		db,
+		"SELECT id as id, r2_key as r2Key, upload_id as uploadId FROM attachment_uploads WHERE uploader_id = ?",
+		[uploaderId],
+	);
+	if (rows.length === 0) return;
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	for (const row of rows) {
+		try {
+			if (bucket && row.uploadId && row.uploadId !== "single") {
+				const upload = bucket.resumeMultipartUpload(row.r2Key, row.uploadId);
+				await upload.abort();
+			}
+		} catch {
+		}
+		try {
+			if (bucket) {
+				await bucket.delete(row.r2Key);
+			}
+		} catch {
+		}
+	}
+	const ids = rows.map((r) => r.id);
+	const placeholders = ids.map(() => "?").join(",");
+	await execute(db, `DELETE FROM attachment_upload_parts WHERE upload_record_id IN (${placeholders})`, ids);
+	await execute(db, `DELETE FROM attachment_uploads WHERE id IN (${placeholders})`, ids);
+}
+
+export async function removeAllCommentAttachmentUploadsForUploader(context: AppLoadContext, uploaderId: number) {
+	const db = getDBFromContext(context);
+	const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
+		db,
+		"SELECT id as id, r2_key as r2Key, upload_id as uploadId FROM comment_attachment_uploads WHERE uploader_id = ?",
+		[uploaderId],
+	);
+	if (rows.length === 0) return;
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	for (const row of rows) {
+		try {
+			if (bucket && row.uploadId && row.uploadId !== "single") {
+				const upload = bucket.resumeMultipartUpload(row.r2Key, row.uploadId);
+				await upload.abort();
+			}
+		} catch {
+		}
+		try {
+			if (bucket) {
+				await bucket.delete(row.r2Key);
+			}
+		} catch {
+		}
+	}
+	const ids = rows.map((r) => r.id);
+	const placeholders = ids.map(() => "?").join(",");
+	await execute(db, `DELETE FROM comment_attachment_upload_parts WHERE upload_record_id IN (${placeholders})`, ids);
+	await execute(db, `DELETE FROM comment_attachment_uploads WHERE id IN (${placeholders})`, ids);
+}
+
 async function sha256(input: string) {
 	const encoder = new TextEncoder();
 	const data = encoder.encode(input);

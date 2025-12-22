@@ -10,6 +10,7 @@ type UserRecord = {
 	password_hash: string;
 	password_salt: string;
 	created_at: number;
+	deleted_at?: number | null;
 	role?: string;
 	is_banned?: number;
 	banned_at?: number | null;
@@ -614,11 +615,20 @@ export async function registerUser(
 
 export async function findUserByEmail(context: AppLoadContext, email: string) {
 	const db = getDBFromContext(context);
-	const record = await queryOne<UserRecord>(
-		db,
-		"SELECT * FROM users WHERE email = ?",
-		[email],
-	);
+	let record: UserRecord | null = null;
+	try {
+		record = await queryOne<UserRecord>(
+			db,
+			"SELECT * FROM users WHERE email = ? AND deleted_at IS NULL",
+			[email],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (!message.includes("no such column") || !message.includes("deleted_at")) {
+			throw error;
+		}
+		record = await queryOne<UserRecord>(db, "SELECT * FROM users WHERE email = ?", [email]);
+	}
 	if (!record) {
 		return null;
 	}
@@ -627,11 +637,16 @@ export async function findUserByEmail(context: AppLoadContext, email: string) {
 
 export async function findUserById(context: AppLoadContext, id: number) {
 	const db = getDBFromContext(context);
-	const record = await queryOne<UserRecord>(
-		db,
-		"SELECT * FROM users WHERE id = ?",
-		[id],
-	);
+	let record: UserRecord | null = null;
+	try {
+		record = await queryOne<UserRecord>(db, "SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", [id]);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (!message.includes("no such column") || !message.includes("deleted_at")) {
+			throw error;
+		}
+		record = await queryOne<UserRecord>(db, "SELECT * FROM users WHERE id = ?", [id]);
+	}
 	if (!record) {
 		return null;
 	}
@@ -645,11 +660,20 @@ export async function verifyLogin(
 ) {
 	const db = getDBFromContext(context);
 	const normalizedEmail = normalizeEmail(email);
-	const record = await queryOne<UserRecord>(
-		db,
-		"SELECT * FROM users WHERE lower(email) = ?",
-		[normalizedEmail],
-	);
+	let record: UserRecord | null = null;
+	try {
+		record = await queryOne<UserRecord>(
+			db,
+			"SELECT * FROM users WHERE lower(email) = ? AND deleted_at IS NULL",
+			[normalizedEmail],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (!message.includes("no such column") || !message.includes("deleted_at")) {
+			throw error;
+		}
+		record = await queryOne<UserRecord>(db, "SELECT * FROM users WHERE lower(email) = ?", [normalizedEmail]);
+	}
 	if (!record) {
 		return null;
 	}
