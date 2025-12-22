@@ -27,17 +27,43 @@ type LoaderData = {
 	registrationPaused: boolean;
 	turnstileSiteKey: string | null;
 	turnstileRenderEnabled: boolean;
-	turnstileVerifyEnabled: boolean;
+	turnstileConfigured: boolean;
+	turnstileEnforced: boolean;
 };
 
-function getTurnstileConfig(context: any) {
+
+function isLocalHostname(hostname: string) {
+	const host = String(hostname || "").toLowerCase();
+	return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1";
+}
+
+function isTurnstileEnforced(context: any, request: Request) {
+	const env = (context as any).cloudflare.env as any;
+	const e2e = String(env?.E2E || "") === "1";
+	const byHeader = request.headers.get("x-e2e-turnstile-enforce") === "1";
+	const byVar = String(env?.TURNSTILE_ENFORCE || "") === "1";
+	if (e2e) return byHeader || byVar;
+	if (byVar) return true;
+	let hostname = "";
+	try {
+		hostname = new URL(request.url).hostname;
+	} catch {
+		hostname = "";
+	}
+	return hostname ? !isLocalHostname(hostname) : true;
+}
+
+function getTurnstileConfig(context: any, request: Request) {
 	const env = (context as any).cloudflare.env as any;
 	const siteKey = typeof env.TURNSTILE_SITE_KEY === "string" ? env.TURNSTILE_SITE_KEY.trim() : "";
 	const secretKey = typeof env.TURNSTILE_SECRET_KEY === "string" ? env.TURNSTILE_SECRET_KEY.trim() : "";
+	const enforced = isTurnstileEnforced(context, request);
+	const configured = Boolean(siteKey && secretKey);
 	return {
 		siteKey: siteKey || null,
 		renderEnabled: Boolean(siteKey),
-		verifyEnabled: Boolean(siteKey && secretKey),
+		configured,
+		enforced,
 	};
 }
 
@@ -57,11 +83,34 @@ async function verifyTurnstileToken(args: {
 	flow: "login" | "register";
 	metadata: Record<string, unknown>;
 }) {
+	const cfg = getTurnstileConfig(args.context, args.request);
+	if (!cfg.enforced) return { enabled: false, ok: true } as const;
+	if (!cfg.configured) {
+		const ip = getClientIp(args.request);
+		const userAgent = args.request.headers.get("User-Agent");
+		const now = Date.now();
+		try {
+			await execute(
+				getDBFromContext(args.context),
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					0,
+					"turnstile_misconfigured",
+					ip,
+					userAgent,
+					JSON.stringify({ flow: args.flow, ...args.metadata }),
+					now,
+				],
+			);
+		} catch {
+		}
+		return { enabled: true, ok: false, message: "真人校验服务未正确配置，请稍后再试" } as const;
+	}
 	const env = (args.context as any).cloudflare.env as any;
-	const siteKey = typeof env.TURNSTILE_SITE_KEY === "string" ? env.TURNSTILE_SITE_KEY.trim() : "";
 	const secretKey = typeof env.TURNSTILE_SECRET_KEY === "string" ? env.TURNSTILE_SECRET_KEY.trim() : "";
-	const enabled = Boolean(siteKey && secretKey);
-	if (!enabled) return { enabled: false, ok: true } as const;
+	if (String(env?.E2E || "") === "1" && args.responseToken.startsWith("e2e_")) {
+		return { enabled: true, ok: true } as const;
+	}
 
 	const ip = getClientIp(args.request);
 	const userAgent = args.request.headers.get("User-Agent");
@@ -136,17 +185,67 @@ async function verifyTurnstileToken(args: {
 		return { enabled: true, ok: false, message: "人机验证失败，请重试" } as const;
 	}
 
+	let requestHostname = "";
+	try {
+		requestHostname = new URL(args.request.url).hostname;
+	} catch {
+		requestHostname = "";
+	}
+	if (data.action && data.action !== args.flow) {
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					0,
+					"turnstile_verify_rejected",
+					ip,
+					userAgent,
+					JSON.stringify({ flow: args.flow, reason: "action_mismatch", action: data.action, ...args.metadata }),
+					now,
+				],
+			);
+		} catch {
+		}
+		return { enabled: true, ok: false, message: "人机验证失败，请重试" } as const;
+	}
+	if (data.hostname && requestHostname && data.hostname !== requestHostname) {
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					0,
+					"turnstile_verify_rejected",
+					ip,
+					userAgent,
+					JSON.stringify({
+						flow: args.flow,
+						reason: "hostname_mismatch",
+						hostname: data.hostname,
+						requestHostname,
+						...args.metadata,
+					}),
+					now,
+				],
+			);
+		} catch {
+		}
+		return { enabled: true, ok: false, message: "人机验证失败，请重试" } as const;
+	}
+
 	return { enabled: true, ok: true } as const;
 }
 
-export async function loader({ context }: LoaderFunctionArgs) {
+export async function loader({ request, context }: LoaderFunctionArgs) {
 	const registrationPaused = await getRegistrationPaused(context);
-	const cfg = getTurnstileConfig(context);
+	const cfg = getTurnstileConfig(context, request);
 	return json<LoaderData>({
 		registrationPaused,
 		turnstileSiteKey: cfg.siteKey,
 		turnstileRenderEnabled: cfg.renderEnabled,
-		turnstileVerifyEnabled: cfg.verifyEnabled,
+		turnstileConfigured: cfg.configured,
+		turnstileEnforced: cfg.enforced,
 	});
 }
 
@@ -259,26 +358,39 @@ export default function Register() {
 	const isSubmitting = navigation.state === "submitting";
 	const [turnstileToken, setTurnstileToken] = useState("");
 	const [turnstileScriptError, setTurnstileScriptError] = useState(false);
+	const [turnstileWidgetError, setTurnstileWidgetError] = useState(false);
 	const registrationPaused = loaderData.registrationPaused;
 	const turnstileRenderEnabled = loaderData.turnstileRenderEnabled;
-	const turnstileVerifyEnabled = loaderData.turnstileVerifyEnabled;
+	const turnstileConfigured = loaderData.turnstileConfigured;
+	const turnstileEnforced = loaderData.turnstileEnforced;
 	const turnstileSiteKey = loaderData.turnstileSiteKey;
+	const turnstileMustPass = turnstileEnforced && turnstileConfigured;
+	const turnstileBlocked =
+		(turnstileMustPass && (!turnstileToken || turnstileWidgetError)) ||
+		(turnstileEnforced && !turnstileConfigured);
 
 	useEffect(() => {
 		if (!turnstileRenderEnabled) return;
 		(window as any).__turnstileRegisterSuccess = (token: string) => {
+			setTurnstileWidgetError(false);
 			setTurnstileToken(String(token || ""));
 		};
 		(window as any).__turnstileRegisterExpired = () => {
 			setTurnstileToken("");
 		};
+		(window as any).__turnstileRegisterError = () => {
+			setTurnstileToken("");
+			setTurnstileWidgetError(true);
+		};
 		setTurnstileScriptError(false);
+		setTurnstileWidgetError(false);
 		const src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
 		const existed = Array.from(document.scripts).some((s) => s.src === src);
 		if (existed) {
 			return () => {
 				delete (window as any).__turnstileRegisterSuccess;
 				delete (window as any).__turnstileRegisterExpired;
+				delete (window as any).__turnstileRegisterError;
 			};
 		}
 		const script = document.createElement("script");
@@ -294,6 +406,7 @@ export default function Register() {
 		return () => {
 			delete (window as any).__turnstileRegisterSuccess;
 			delete (window as any).__turnstileRegisterExpired;
+			delete (window as any).__turnstileRegisterError;
 			script.remove();
 		};
 	}, [turnstileRenderEnabled]);
@@ -319,11 +432,56 @@ export default function Register() {
 					</div>
 				) : (
 					<Form method="post" className="space-y-5">
-					<div>
-						<label
-							htmlFor="register-email"
-							className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
-						>
+						{turnstileEnforced && !turnstileConfigured ? (
+							<div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+								真人校验服务未正确配置，暂时无法注册，请稍后再试
+							</div>
+						) : null}
+						{turnstileRenderEnabled ? (
+							<div className="space-y-2">
+								<div className="flex justify-center">
+									<div
+									className="cf-turnstile min-h-[65px] min-w-[300px]"
+									data-sitekey={turnstileSiteKey ?? ""}
+									data-theme="auto"
+									data-action="register"
+									data-response-field="false"
+									data-callback="__turnstileRegisterSuccess"
+									data-expired-callback="__turnstileRegisterExpired"
+									data-error-callback="__turnstileRegisterError"
+								/>
+								</div>
+								<input type="hidden" name="cf-turnstile-response" value={turnstileToken} />
+								{turnstileMustPass ? (
+									turnstileToken ? null : (
+										<p className="text-center text-xs text-gray-600 dark:text-gray-300">请完成人机验证后继续</p>
+									)
+								) : (
+									<p className="text-center text-xs text-amber-700 dark:text-amber-200">
+										真人验证当前未强制启用
+									</p>
+								)}
+								{turnstileScriptError ? (
+									<p className="text-center text-xs text-red-600">验证组件加载失败，请检查网络或刷新页面</p>
+								) : null}
+								{turnstileWidgetError ? (
+									<p className="text-center text-xs text-red-600">验证失败，请刷新页面后重试</p>
+								) : null}
+							</div>
+						) : turnstileEnforced ? (
+							<div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+								真人校验服务未正确配置，暂时无法注册，请稍后再试
+							</div>
+						) : (
+							<p className="text-center text-xs text-amber-700 dark:text-amber-200">
+								真人验证未启用（缺少 Site Key），当前不会强制校验
+							</p>
+						)}
+						<div>
+							<label
+								htmlFor="register-email"
+								className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200"
+							>
 							邮箱
 						</label>
 						<input
@@ -393,44 +551,14 @@ export default function Register() {
 					{actionData?.formError ? (
 						<p className="text-sm text-red-600">{actionData.formError}</p>
 					) : null}
-					{turnstileRenderEnabled ? (
-						<div className="space-y-2">
-							<div className="flex justify-center">
-								<div
-									className="cf-turnstile"
-									data-sitekey={turnstileSiteKey ?? ""}
-									data-theme="auto"
-									data-callback="__turnstileRegisterSuccess"
-									data-expired-callback="__turnstileRegisterExpired"
-									data-error-callback="__turnstileRegisterExpired"
-								/>
-							</div>
-							{turnstileVerifyEnabled ? (
-								turnstileToken ? null : (
-									<p className="text-center text-xs text-gray-600 dark:text-gray-300">请完成人机验证后继续</p>
-								)
-							) : (
-								<p className="text-center text-xs text-amber-700 dark:text-amber-200">
-									真人验证未完整配置（缺少 Secret Key），当前不会强制校验
-								</p>
-							)}
-							{turnstileScriptError ? (
-								<p className="text-center text-xs text-red-600">验证组件加载失败，请检查网络或刷新页面</p>
-							) : null}
-						</div>
-					) : (
-						<p className="text-center text-xs text-amber-700 dark:text-amber-200">
-							真人验证未启用（缺少 Site Key），当前不会强制校验
-						</p>
-					)}
-					<button
-						type="submit"
-						disabled={isSubmitting || (turnstileVerifyEnabled && !turnstileToken)}
-						className="flex w-full items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-					>
-						{isSubmitting ? "注册中..." : "注册"}
-					</button>
-				</Form>
+						<button
+							type="submit"
+							disabled={isSubmitting || turnstileBlocked}
+							className="flex w-full items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+						>
+							{isSubmitting ? "注册中..." : "注册"}
+						</button>
+					</Form>
 				)}
 				<p className="mt-4 text-center text-sm text-gray-600 dark:text-gray-300">
 					已有账号？
