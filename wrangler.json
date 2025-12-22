@@ -13,7 +13,8 @@
 		"SUPERADMIN_EMAIL": "7103308@qq.com",
 		"PUBLIC_BASE_URL": "https://7103308.cfd",
 		"EMAIL_PROVIDER": "auto",
-		"EMAIL_FROM": "noreply@7103308.cfd"
+		"EMAIL_FROM": "noreply@7103308.cfd",
+		"TURNSTILE_SITE_KEY": ""
 	},
 	"d1_databases": [
 		{

@@ -25,14 +25,19 @@ type ActionData = {
 
 type LoaderData = {
 	turnstileSiteKey: string | null;
-	turnstileEnabled: boolean;
+	turnstileRenderEnabled: boolean;
+	turnstileVerifyEnabled: boolean;
 };
 
 function getTurnstileConfig(context: any) {
 	const env = (context as any).cloudflare.env as any;
 	const siteKey = typeof env.TURNSTILE_SITE_KEY === "string" ? env.TURNSTILE_SITE_KEY.trim() : "";
 	const secretKey = typeof env.TURNSTILE_SECRET_KEY === "string" ? env.TURNSTILE_SECRET_KEY.trim() : "";
-	return { siteKey: siteKey || null, enabled: Boolean(siteKey && secretKey) };
+	return {
+		siteKey: siteKey || null,
+		renderEnabled: Boolean(siteKey),
+		verifyEnabled: Boolean(siteKey && secretKey),
+	};
 }
 
 type TurnstileVerifyResponse = {
@@ -89,6 +94,21 @@ async function verifyTurnstileToken(args: {
 		});
 		data = (await resp.json()) as TurnstileVerifyResponse;
 	} catch {
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					0,
+					"turnstile_verify_error",
+					ip,
+					userAgent,
+					JSON.stringify({ flow: args.flow, reason: "request_failed", ...args.metadata }),
+					now,
+				],
+			);
+		} catch {
+		}
 		data = null;
 	}
 
@@ -120,7 +140,11 @@ async function verifyTurnstileToken(args: {
 
 export async function loader({ context }: LoaderFunctionArgs) {
 	const cfg = getTurnstileConfig(context);
-	return json<LoaderData>({ turnstileSiteKey: cfg.siteKey, turnstileEnabled: cfg.enabled });
+	return json<LoaderData>({
+		turnstileSiteKey: cfg.siteKey,
+		turnstileRenderEnabled: cfg.renderEnabled,
+		turnstileVerifyEnabled: cfg.verifyEnabled,
+	});
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -270,24 +294,46 @@ export default function Login() {
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
 	const [turnstileToken, setTurnstileToken] = useState("");
+	const [turnstileScriptError, setTurnstileScriptError] = useState(false);
 	const [searchParams] = useSearchParams();
 	const resetSuccess = searchParams.get("reset") === "1";
-	const turnstileEnabled = loaderData.turnstileEnabled;
+	const turnstileRenderEnabled = loaderData.turnstileRenderEnabled;
+	const turnstileVerifyEnabled = loaderData.turnstileVerifyEnabled;
 	const turnstileSiteKey = loaderData.turnstileSiteKey;
 
 	useEffect(() => {
-		if (!turnstileEnabled) return;
+		if (!turnstileRenderEnabled) return;
 		(window as any).__turnstileLoginSuccess = (token: string) => {
 			setTurnstileToken(String(token || ""));
 		};
 		(window as any).__turnstileLoginExpired = () => {
 			setTurnstileToken("");
 		};
+		setTurnstileScriptError(false);
+		const src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+		const existed = Array.from(document.scripts).some((s) => s.src === src);
+		if (existed) {
+			return () => {
+				delete (window as any).__turnstileLoginSuccess;
+				delete (window as any).__turnstileLoginExpired;
+			};
+		}
+		const script = document.createElement("script");
+		script.src = src;
+		script.async = true;
+		script.defer = true;
+		script.crossOrigin = "anonymous";
+		script.addEventListener("error", () => {
+			setTurnstileScriptError(true);
+			console.warn("Turnstile 脚本加载失败");
+		});
+		document.head.appendChild(script);
 		return () => {
 			delete (window as any).__turnstileLoginSuccess;
 			delete (window as any).__turnstileLoginExpired;
+			script.remove();
 		};
-	}, [turnstileEnabled]);
+	}, [turnstileRenderEnabled]);
 
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-900">
@@ -295,13 +341,6 @@ export default function Login() {
 				<h1 className="mb-6 text-center text-2xl font-semibold text-gray-900 dark:text-gray-100">
 					登录
 				</h1>
-				{turnstileEnabled ? (
-					<script
-						src="https://challenges.cloudflare.com/turnstile/v0/api.js"
-						async
-						defer
-					/>
-				) : null}
 				{resetSuccess ? (
 					<div className="mb-5 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200">
 						密码已重置，请使用新密码登录
@@ -352,7 +391,7 @@ export default function Login() {
 							) : null}
 						</div>
 					) : null}
-					{turnstileEnabled ? (
+					{turnstileRenderEnabled ? (
 						<div className="space-y-2">
 							<div className="flex justify-center">
 								<div
@@ -364,14 +403,27 @@ export default function Login() {
 									data-error-callback="__turnstileLoginExpired"
 								/>
 							</div>
-							{turnstileToken ? null : (
-								<p className="text-center text-xs text-gray-600 dark:text-gray-300">请完成人机验证后继续</p>
+							{turnstileVerifyEnabled ? (
+								turnstileToken ? null : (
+									<p className="text-center text-xs text-gray-600 dark:text-gray-300">请完成人机验证后继续</p>
+								)
+							) : (
+								<p className="text-center text-xs text-amber-700 dark:text-amber-200">
+									真人验证未完整配置（缺少 Secret Key），当前不会强制校验
+								</p>
 							)}
+							{turnstileScriptError ? (
+								<p className="text-center text-xs text-red-600">验证组件加载失败，请检查网络或刷新页面</p>
+							) : null}
 						</div>
-					) : null}
+					) : (
+						<p className="text-center text-xs text-amber-700 dark:text-amber-200">
+							真人验证未启用（缺少 Site Key），当前不会强制校验
+						</p>
+					)}
 					<button
 						type="submit"
-						disabled={isSubmitting || (turnstileEnabled && !turnstileToken)}
+						disabled={isSubmitting || (turnstileVerifyEnabled && !turnstileToken)}
 						className="flex w-full items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
 					>
 						{isSubmitting ? "登录中..." : "登录"}
