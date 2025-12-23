@@ -47,6 +47,22 @@ export default function PostsIndex() {
 					<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
 						帖子列表
 					</h1>
+					{data.user ? (
+						<div className="flex flex-wrap items-center gap-2">
+							<Link
+								to="/messages"
+								className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+							>
+								消息中心
+							</Link>
+							<Link
+								to="/me"
+								className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+							>
+								个人中心
+							</Link>
+						</div>
+					) : null}
 				</header>
 				{isBanned ? (
 					<div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">

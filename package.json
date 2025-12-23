@@ -53,6 +53,7 @@
 		"dev": "remix vite:dev",
 		"lint": "eslint --cache --cache-location ./node_modules/.cache/eslint .",
 		"test:e2e": "playwright test",
+		"test:unit": "playwright test -c playwright.unit.config.ts",
 		"preview": "npm run build && wrangler dev",
 		"start": "wrangler dev",
 		"typecheck": "tsc",

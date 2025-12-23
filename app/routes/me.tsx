@@ -104,12 +104,20 @@ export default function MePage() {
 							<p className="mt-2 text-sm text-red-600 dark:text-red-200">账号已被封禁</p>
 						) : null}
 					</div>
-					<Link
-						to="/posts"
-						className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-					>
-						返回论坛
-					</Link>
+					<div className="flex flex-wrap items-center gap-2">
+						<Link
+							to="/messages"
+							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+						>
+							消息中心
+						</Link>
+						<Link
+							to="/posts"
+							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+						>
+							返回论坛
+						</Link>
+					</div>
 				</header>
 
 				<section className="overflow-hidden rounded-xl bg-white shadow dark:bg-gray-800">
