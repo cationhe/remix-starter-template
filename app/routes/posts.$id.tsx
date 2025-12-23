@@ -20,6 +20,7 @@ import {
 	removeAllAttachmentsForPost,
 	removeAllCommentAttachmentsForPost,
 } from "~/lib/attachments.server";
+import { formatTotalStorageLimit } from "~/lib/attachment-storage";
 import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachments.server";
 
 const attachmentLimits = {
@@ -625,6 +626,7 @@ export default function PostDetailPage() {
 	const canManageAttachments = Boolean(isAuthor && !isBanned);
 	const uploadsPaused = data.attachmentStorage.paused;
 	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
+	const uploadsPausedMessage = `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
 	const maxFilesPerPost = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
 	const maxTotalPostBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_POST_BYTES;
 	const maxFileSizeBytesForUser = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_FILE_SIZE_BYTES;
@@ -1343,7 +1345,7 @@ export default function PostDetailPage() {
 	async function startUpload() {
 		if (!canUpload) {
 			if (canManageAttachments && uploadsPaused) {
-				setGlobalError("网站总存储量已超过 9GB，已暂停附件上传");
+				setGlobalError(uploadsPausedMessage);
 			}
 			return;
 		}
@@ -1778,11 +1780,11 @@ export default function PostDetailPage() {
 										</span>
 									</button>
 								</div>
-								{uploadsPaused ? (
-									<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
-										网站总存储量已超过 9GB，已暂停附件上传
-									</div>
-								) : null}
+							{uploadsPaused ? (
+								<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+									{uploadsPausedMessage}
+								</div>
+							) : null}
 							<input
 								ref={fileInputRef}
 								type="file"

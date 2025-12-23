@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { attachmentStorageLimits } from "~/lib/attachments.server";
+import { getAttachmentStorageUsage } from "~/lib/attachments.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 
 type ActionData = { ok: true } | { ok: false; error: string };
@@ -41,7 +41,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			"seed/quota_full",
 			"seed.bin",
 			"application/octet-stream",
-			attachmentStorageLimits.MAX_TOTAL_STORAGE_BYTES,
+			(await getAttachmentStorageUsage(context)).limitBytes,
 			Date.now(),
 		],
 	);

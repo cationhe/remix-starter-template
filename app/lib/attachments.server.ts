@@ -1,5 +1,10 @@
 import type { AppLoadContext } from "@remix-run/cloudflare";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
+import {
+	attachmentStorageLimits,
+	formatTotalStorageLimit,
+	normalizeTotalStorageLimitBytes,
+} from "~/lib/attachment-storage";
 
 export type AttachmentRecord = {
 	id: number;
@@ -60,7 +65,25 @@ const MAX_TOTAL_COMMENT_BYTES = 500 * 1024 * 1024;
 const MULTIPART_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const PART_SIZE_BYTES = 5 * 1024 * 1024;
 const UPLOAD_EXPIRES_MS = 60 * 60 * 1000;
-const MAX_TOTAL_STORAGE_BYTES = 9 * 1024 * 1024 * 1024;
+
+export async function getSiteTotalStorageLimitBytes(context: AppLoadContext) {
+	try {
+		const db = getDBFromContext(context);
+		const row = await queryOne<{ valueJson: string }>(
+			db,
+			"SELECT value_json as valueJson FROM app_settings WHERE key = ?",
+			[attachmentStorageLimits.TOTAL_STORAGE_LIMIT_SETTING_KEY],
+		);
+		if (!row?.valueJson) {
+			return attachmentStorageLimits.DEFAULT_TOTAL_STORAGE_LIMIT_BYTES;
+		}
+		const parsed = JSON.parse(row.valueJson) as unknown;
+		const raw = typeof parsed === "number" ? parsed : Number(parsed);
+		return normalizeTotalStorageLimitBytes(raw);
+	} catch {
+		return attachmentStorageLimits.DEFAULT_TOTAL_STORAGE_LIMIT_BYTES;
+	}
+}
 
 const allowedExtensions = new Set([
 	"pdf",
@@ -212,7 +235,7 @@ export async function getAttachmentStorageUsage(context: AppLoadContext, now = D
 	);
 	const usedBytes = Number(usedRow?.sum ?? 0);
 	const reservedBytes = Number(reservedRow?.sum ?? 0);
-	const limitBytes = MAX_TOTAL_STORAGE_BYTES;
+	const limitBytes = await getSiteTotalStorageLimitBytes(context);
 	const paused = usedBytes + reservedBytes >= limitBytes;
 	return { usedBytes, reservedBytes, limitBytes, paused };
 }
@@ -226,7 +249,10 @@ export async function assertWithinSiteStorageQuota(args: {
 	const extraBytes = Math.max(0, Number(args.extraBytes || 0));
 	const usage = await getAttachmentStorageUsage(args.context, now);
 	if (usage.usedBytes + usage.reservedBytes + extraBytes > usage.limitBytes) {
-		throw new Response("网站总存储量已超过 9GB，已暂停附件上传", { status: 400 });
+		throw new Response(
+			`网站总存储量已达到上限（${formatTotalStorageLimit(usage.limitBytes)}），已暂停附件上传`,
+			{ status: 400 },
+		);
 	}
 }
 
@@ -1068,6 +1094,4 @@ export const attachmentLimits = {
 	PART_SIZE_BYTES,
 };
 
-export const attachmentStorageLimits = {
-	MAX_TOTAL_STORAGE_BYTES,
-};
+export { attachmentStorageLimits, formatTotalStorageLimit, normalizeTotalStorageLimitBytes };
