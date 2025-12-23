@@ -1,7 +1,15 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, Link, useActionData, useFetcher, useLoaderData, useNavigation } from "@remix-run/react";
-import { useEffect, useMemo, useState } from "react";
+import {
+	Form,
+	Link,
+	useActionData,
+	useFetcher,
+	useLoaderData,
+	useNavigation,
+	useRevalidator,
+} from "@remix-run/react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
 import {
 	countMessagesForUser,
@@ -125,11 +133,13 @@ export default function MessagesPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
+	const revalidator = useRevalidator();
 	const isSubmitting = navigation.state === "submitting";
 	const [selectedId, setSelectedId] = useState<number | null>(null);
 	const [draft, setDraft] = useState("");
-	const markFetcher = useFetcher();
+	const markFetcher = useFetcher<{ ok: boolean }>();
 	const unreadFetcher = useFetcher<{ unreadCount: number }>();
+	const handledMarkReadRef = useRef(false);
 
 	useEffect(() => {
 		const id = setInterval(() => {
@@ -138,6 +148,20 @@ export default function MessagesPage() {
 		}, 10000);
 		return () => clearInterval(id);
 	}, [unreadFetcher]);
+
+	useEffect(() => {
+		if (markFetcher.state === "submitting") {
+			handledMarkReadRef.current = false;
+			return;
+		}
+		if (markFetcher.state !== "idle") return;
+		if (!markFetcher.data?.ok) return;
+		if (handledMarkReadRef.current) return;
+		handledMarkReadRef.current = true;
+		unreadFetcher.load("/api/messages/unread");
+		window.dispatchEvent(new Event("messages-unread-refresh"));
+		revalidator.revalidate();
+	}, [markFetcher.state, markFetcher.data, unreadFetcher, revalidator]);
 
 	const unreadCount =
 		unreadFetcher.data && typeof unreadFetcher.data.unreadCount === "number"

@@ -7,8 +7,11 @@ import {
 	Outlet,
 	Scripts,
 	ScrollRestoration,
+	useFetcher,
 	useLoaderData,
 } from "@remix-run/react";
+
+import { useEffect } from "react";
 
 import { findUserById } from "~/lib/auth.server";
 import { getSession } from "~/lib/session.server";
@@ -65,6 +68,40 @@ export default function App() {
 	const user = data.user;
 	const showAdmin = Boolean(user && (user.role === "admin" || user.role === "superadmin"));
 	const isBanned = Boolean(user?.isBanned);
+	const unreadFetcher = useFetcher<{ unreadCount: number }>();
+	const unreadCount = user && !isBanned ? Number(unreadFetcher.data?.unreadCount ?? 0) : 0;
+
+	useEffect(() => {
+		if (!user || isBanned) return;
+
+		let active = true;
+		const loadUnread = () => {
+			if (!active) return;
+			if (unreadFetcher.state !== "idle") return;
+			unreadFetcher.load("/api/messages/unread");
+		};
+
+		loadUnread();
+		const intervalId = setInterval(loadUnread, 3000);
+		const onVisibility = () => {
+			if (document.visibilityState === "visible") {
+				loadUnread();
+			}
+		};
+		const onRefresh = () => loadUnread();
+
+		window.addEventListener("focus", loadUnread);
+		document.addEventListener("visibilitychange", onVisibility);
+		window.addEventListener("messages-unread-refresh", onRefresh);
+
+		return () => {
+			active = false;
+			clearInterval(intervalId);
+			window.removeEventListener("focus", loadUnread);
+			document.removeEventListener("visibilitychange", onVisibility);
+			window.removeEventListener("messages-unread-refresh", onRefresh);
+		};
+	}, [user, isBanned, unreadFetcher]);
 
 	return (
 		<>
@@ -95,6 +132,18 @@ export default function App() {
 										已封禁
 									</span>
 								) : null}
+								<Link
+									to="/messages"
+									className="relative inline-flex items-center rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									aria-label={unreadCount > 0 ? `消息中心，${unreadCount} 条未读` : "消息中心"}
+								>
+									消息中心
+									{unreadCount > 0 ? (
+										<span className="ml-2 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-red-600 px-1.5 text-xs font-semibold leading-5 text-white">
+											{unreadCount > 99 ? "99+" : unreadCount}
+										</span>
+									) : null}
+								</Link>
 								<Link
 									to="/me"
 									className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
