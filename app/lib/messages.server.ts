@@ -158,3 +158,34 @@ export async function markMessageAsRead(context: AppLoadContext, args: { userId:
 	return { ok: true as const, changed: Number(result.meta?.changes ?? 0) };
 }
 
+export async function deleteMessagesForUser(context: AppLoadContext, args: { userId: number; messageIds: number[] }) {
+	const ids = args.messageIds
+		.filter((n) => Number.isFinite(n) && n > 0)
+		.map((n) => Math.floor(n));
+	const uniqueIds = Array.from(new Set(ids));
+	if (uniqueIds.length === 0) {
+		return { ok: false as const, error: "未选择要删除的消息" };
+	}
+	if (uniqueIds.length > 500) {
+		return { ok: false as const, error: "一次最多删除 500 条消息" };
+	}
+
+	const db = getDBFromContext(context);
+	const placeholders = uniqueIds.map(() => "?").join(",");
+	const owned = await queryOne<{ count: number | string }>(
+		db,
+		`SELECT COUNT(1) as count FROM messages WHERE id IN (${placeholders}) AND (sender_id = ? OR recipient_id = ?)`,
+		[...uniqueIds, args.userId, args.userId],
+	);
+	const ownedCount = Number(owned?.count ?? 0);
+	if (ownedCount !== uniqueIds.length) {
+		return { ok: false as const, error: "包含不存在或无权删除的消息" };
+	}
+
+	const result = await execute(
+		db,
+		`DELETE FROM messages WHERE id IN (${placeholders}) AND (sender_id = ? OR recipient_id = ?)`,
+		[...uniqueIds, args.userId, args.userId],
+	);
+	return { ok: true as const, deletedCount: Number(result.meta?.changes ?? 0) };
+}

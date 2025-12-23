@@ -138,8 +138,15 @@ export default function MessagesPage() {
 	const [selectedId, setSelectedId] = useState<number | null>(null);
 	const [draft, setDraft] = useState("");
 	const markFetcher = useFetcher<{ ok: boolean }>();
+	const deleteFetcher = useFetcher<{ ok: boolean; deletedCount?: number; error?: string }>();
 	const unreadFetcher = useFetcher<{ unreadCount: number }>();
 	const handledMarkReadRef = useRef(false);
+	const handledDeleteRef = useRef(false);
+	const [selectedMessageIds, setSelectedMessageIds] = useState<Set<number>>(() => new Set());
+
+	useEffect(() => {
+		setSelectedMessageIds(new Set());
+	}, [data.page]);
 
 	useEffect(() => {
 		const id = setInterval(() => {
@@ -163,6 +170,21 @@ export default function MessagesPage() {
 		revalidator.revalidate();
 	}, [markFetcher.state, markFetcher.data, unreadFetcher, revalidator]);
 
+	useEffect(() => {
+		if (deleteFetcher.state === "submitting") {
+			handledDeleteRef.current = false;
+			return;
+		}
+		if (deleteFetcher.state !== "idle") return;
+		if (!deleteFetcher.data?.ok) return;
+		if (handledDeleteRef.current) return;
+		handledDeleteRef.current = true;
+		setSelectedMessageIds(new Set());
+		unreadFetcher.load("/api/messages/unread");
+		window.dispatchEvent(new Event("messages-unread-refresh"));
+		revalidator.revalidate();
+	}, [deleteFetcher.state, deleteFetcher.data, unreadFetcher, revalidator]);
+
 	const unreadCount =
 		unreadFetcher.data && typeof unreadFetcher.data.unreadCount === "number"
 			? unreadFetcher.data.unreadCount
@@ -179,6 +201,45 @@ export default function MessagesPage() {
 
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
+	const allOnPageSelected = data.messages.length > 0 && data.messages.every((m) => selectedMessageIds.has(m.id));
+	const selectedCount = selectedMessageIds.size;
+	const canBulkDelete = selectedCount > 0 && selectedCount <= 500 && deleteFetcher.state !== "submitting";
+	const bulkDeleteError = deleteFetcher.data && !deleteFetcher.data.ok ? deleteFetcher.data.error : null;
+
+	function toggleSelectMessage(messageId: number) {
+		setSelectedMessageIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(messageId)) {
+				next.delete(messageId);
+			} else {
+				next.add(messageId);
+			}
+			return next;
+		});
+	}
+
+	function toggleSelectAllOnPage() {
+		setSelectedMessageIds((prev) => {
+			const next = new Set(prev);
+			if (allOnPageSelected) {
+				for (const m of data.messages) next.delete(m.id);
+			} else {
+				for (const m of data.messages) next.add(m.id);
+			}
+			return next;
+		});
+	}
+
+	function submitBulkDelete() {
+		const ids = Array.from(selectedMessageIds);
+		if (ids.length === 0) return;
+		if (ids.length > 500) return;
+		const formData = new FormData();
+		for (const id of ids) {
+			formData.append("id", String(id));
+		}
+		deleteFetcher.submit(formData, { method: "delete", action: "/api/messages" });
+	}
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -272,12 +333,44 @@ export default function MessagesPage() {
 				</section>
 
 				<section className="rounded-xl bg-white shadow dark:bg-gray-800">
-					<div className="flex items-center justify-between px-6 py-4">
-						<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">消息列表</h2>
-						<div className="text-xs text-gray-500 dark:text-gray-400">
-							共 {data.totalCount} 条，第 {data.page}/{data.totalPages} 页
+					<div className="flex items-center justify-between gap-4 px-6 py-4">
+						<div className="flex min-w-0 items-center gap-4">
+							<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">消息列表</h2>
+							<label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+								<input
+									type="checkbox"
+									checked={allOnPageSelected}
+									onChange={toggleSelectAllOnPage}
+									disabled={data.messages.length === 0 || deleteFetcher.state === "submitting"}
+									className="h-4 w-4"
+								/>
+								<span>全选</span>
+							</label>
+							<button
+								type="button"
+								onClick={submitBulkDelete}
+								disabled={!canBulkDelete}
+								className="rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
+							>
+								{deleteFetcher.state === "submitting"
+									? "删除中..."
+									: `删除${selectedCount > 0 ? `（${selectedCount}）` : ""}`}
+							</button>
+						</div>
+						<div className="shrink-0 text-right text-xs text-gray-500 dark:text-gray-400">
+							<div>
+								共 {data.totalCount} 条，第 {data.page}/{data.totalPages} 页
+							</div>
+							{selectedCount > 500 ? <div className="text-red-600 dark:text-red-300">一次最多删除 500 条</div> : null}
 						</div>
 					</div>
+					{bulkDeleteError ? (
+						<div className="px-6 pb-4">
+							<div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+								{bulkDeleteError}
+							</div>
+						</div>
+					) : null}
 					{data.messages.length === 0 ? (
 						<p className="px-6 pb-6 text-sm text-gray-600 dark:text-gray-300">暂无消息</p>
 					) : (
@@ -287,7 +380,14 @@ export default function MessagesPage() {
 								const unread = isRecipient && !m.readAt;
 								return (
 									<li key={m.id} className={unread ? "bg-amber-50/60 px-6 py-4 dark:bg-amber-900/10" : "px-6 py-4"}>
-										<div className="flex items-start justify-between gap-3">
+										<div className="flex items-start gap-3">
+											<input
+												type="checkbox"
+												checked={selectedMessageIds.has(m.id)}
+												onChange={() => toggleSelectMessage(m.id)}
+												disabled={deleteFetcher.state === "submitting"}
+												className="mt-1 h-4 w-4"
+											/>
 											<div className="min-w-0 flex-1">
 												<div className="flex flex-wrap items-center gap-2">
 													<span className="text-sm font-medium text-gray-900 dark:text-gray-100">
@@ -318,17 +418,17 @@ export default function MessagesPage() {
 												</div>
 											</div>
 											{unread ? (
-												<markFetcher.Form method="post">
+												<markFetcher.Form method="post" className="ml-auto shrink-0">
 													<input type="hidden" name="intent" value="markRead" />
 													<input type="hidden" name="messageId" value={m.id} />
 													<button
 														type="submit"
 														className="shrink-0 rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 disabled:opacity-70 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-														disabled={markFetcher.state === "submitting"}
-													>
-														标记已读
-													</button>
-												</markFetcher.Form>
+													disabled={markFetcher.state === "submitting" || deleteFetcher.state === "submitting"}
+												>
+													标记已读
+												</button>
+											</markFetcher.Form>
 										) : null}
 									</div>
 								</li>
