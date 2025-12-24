@@ -27,7 +27,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
 	assertAdmin(me);
-	if (me.role !== "superadmin") {
+	if (me.role !== "superadmin" && me.role !== "topadmin") {
 		throw redirect("/");
 	}
 
@@ -39,7 +39,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
 	assertAdmin(me);
-	if (me.role !== "superadmin") {
+	if (me.role !== "superadmin" && me.role !== "topadmin") {
 		return json<ActionData>({ formError: "只有超级管理员可以审批" }, { status: 403 });
 	}
 
@@ -250,4 +250,3 @@ export default function AdminNicknameRequestsPage() {
 		</div>
 	);
 }
-

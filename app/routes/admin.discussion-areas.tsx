@@ -75,7 +75,7 @@ async function logEvent(args: {
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
-	if (me.role !== "superadmin") {
+	if (me.role !== "superadmin" && me.role !== "topadmin") {
 		throw new Response("只有超级管理员可访问", { status: 403 });
 	}
 	const db = getDBFromContext(context);
@@ -89,8 +89,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
-	if (me.role !== "superadmin") {
-		return json<ActionData>({ formError: "只有超级管理员可以管理讨论区" }, { status: 403 });
+	if (me.role !== "superadmin" && me.role !== "topadmin") {
+		return json<ActionData>({ formError: "只有超级管理员可访问" }, { status: 403 });
 	}
 
 	const formData = await request.formData();

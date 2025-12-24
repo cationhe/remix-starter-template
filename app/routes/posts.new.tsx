@@ -32,7 +32,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
 	const db = getDBFromContext(context);
-	const canSeeHidden = user.role === "superadmin";
+	const canSeeHidden = user.role === "superadmin" || user.role === "topadmin";
 	const areas = await queryAll<AreaListItem>(
 		db,
 		canSeeHidden
@@ -80,7 +80,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		if (!area) {
 			return json<ActionData>({ fields, formError: "讨论区不存在" }, { status: 400 });
 		}
-		if (area.isHidden && user.role !== "superadmin") {
+		if (area.isHidden && user.role !== "superadmin" && user.role !== "topadmin") {
 			return json<ActionData>({ fields, formError: "该讨论区已隐藏，无法发帖" }, { status: 403 });
 		}
 		const quota = await consumeDailyQuota({ context, request, user, kind: "post" });

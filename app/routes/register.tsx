@@ -7,6 +7,7 @@ import {
 	findUserByEmail,
 	getRegistrationPaused,
 	getClientIp,
+	promoteToTopadminIfMatch,
 	promoteToSuperadminIfMatch,
 	registerUser,
 } from "~/lib/auth.server";
@@ -342,6 +343,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	try {
 		const user = await registerUser(context, email, displayName, password);
+		await promoteToTopadminIfMatch(context, user.id);
 		await promoteToSuperadminIfMatch(context, user.id);
 		const session = await getSession(request, context);
 		session.set("userId", user.id);

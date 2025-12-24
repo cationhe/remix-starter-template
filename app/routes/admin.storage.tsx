@@ -36,7 +36,7 @@ function toStepGb(value: number) {
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
-	if (me.role !== "superadmin") {
+	if (me.role !== "superadmin" && me.role !== "topadmin") {
 		throw new Response("只有超级管理员可访问", { status: 403 });
 	}
 	const usage = await getAttachmentStorageUsage(context);
@@ -46,7 +46,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
-	if (me.role !== "superadmin") {
+	if (me.role !== "superadmin" && me.role !== "topadmin") {
 		return json<ActionData>({ formError: "只有超级管理员可以修改存储容量" }, { status: 403 });
 	}
 

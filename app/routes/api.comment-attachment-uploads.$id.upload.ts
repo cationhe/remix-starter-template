@@ -35,7 +35,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
-	const isSuperadminUser = user.role === "superadmin";
+	const isSuperadminUser = user.role === "superadmin" || user.role === "topadmin";
 
 	const uploadRecordId = parseId(params.id);
 	if (!uploadRecordId) {

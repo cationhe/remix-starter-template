@@ -22,19 +22,19 @@ export type RecipientListItem = {
 };
 
 export function canSendMessage(senderRole: UserRole, recipientRole: UserRole) {
-	if (senderRole === "superadmin") {
+	if (senderRole === "superadmin" || senderRole === "topadmin") {
 		return recipientRole === "admin" || recipientRole === "user";
 	}
 	if (senderRole === "admin") {
-		return recipientRole === "superadmin" || recipientRole === "user";
+		return recipientRole === "superadmin" || recipientRole === "topadmin" || recipientRole === "user";
 	}
-	return recipientRole === "superadmin" || recipientRole === "admin";
+	return recipientRole === "superadmin" || recipientRole === "topadmin" || recipientRole === "admin";
 }
 
 export function getAllowedRecipientRoles(senderRole: UserRole): UserRole[] {
-	if (senderRole === "superadmin") return ["admin", "user"];
-	if (senderRole === "admin") return ["superadmin", "user"];
-	return ["superadmin", "admin"];
+	if (senderRole === "superadmin" || senderRole === "topadmin") return ["admin", "user"];
+	if (senderRole === "admin") return ["superadmin", "topadmin", "user"];
+	return ["superadmin", "topadmin", "admin"];
 }
 
 export async function listRecipientsForUser(context: AppLoadContext, me: AuthUser, limit = 200) {
@@ -115,7 +115,7 @@ export async function findRecipientById(context: AppLoadContext, userId: number)
 	);
 	if (!row || row.deletedAt) return null;
 	const role = row.role as UserRole;
-	if (role !== "superadmin" && role !== "admin" && role !== "user") return null;
+	if (role !== "topadmin" && role !== "superadmin" && role !== "admin" && role !== "user") return null;
 	return { id: row.id, role, displayName: row.displayName };
 }
 

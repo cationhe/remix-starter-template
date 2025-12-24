@@ -168,7 +168,7 @@ export async function listSuperadminIds(context: AppLoadContext) {
 	try {
 		const rows = await queryAll<{ id: number }>(
 			db,
-			"SELECT id as id FROM users WHERE role = 'superadmin' AND deleted_at IS NULL ORDER BY created_at ASC",
+			"SELECT id as id FROM users WHERE role IN ('superadmin', 'topadmin') AND deleted_at IS NULL ORDER BY created_at ASC",
 		);
 		return rows.map((r) => r.id);
 	} catch (error) {

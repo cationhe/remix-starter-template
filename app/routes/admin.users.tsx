@@ -52,7 +52,7 @@ function parseId(value: FormDataEntryValue | null) {
 
 function normalizeRole(value: FormDataEntryValue | null): UserRole | null {
 	const raw = typeof value === "string" ? value : "";
-	if (raw === "superadmin" || raw === "admin" || raw === "user") {
+	if (raw === "topadmin" || raw === "superadmin" || raw === "admin" || raw === "user") {
 		return raw;
 	}
 	return null;
@@ -89,7 +89,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const formData = await request.formData();
 	const intent = String(formData.get("intent") || "");
 	if (intent === "setRegistrationPaused") {
-		if (me.role !== "superadmin") {
+		if (me.role !== "superadmin" && me.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以修改注册状态" }, { status: 403 });
 		}
 		const pausedRaw = String(formData.get("paused") || "");
@@ -155,26 +155,110 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	if (!target) {
 		return json<ActionData>({ formError: "用户不存在" }, { status: 404 });
 	}
-	if (target.role === "superadmin" && me.role !== "superadmin") {
+	if (target.role === "topadmin" && me.role !== "topadmin") {
+		return json<ActionData>({ formError: "无权操作 topadmin" }, { status: 403 });
+	}
+	if (target.role === "superadmin" && me.role !== "superadmin" && me.role !== "topadmin") {
 		return json<ActionData>({ formError: "无权操作超级管理员" }, { status: 403 });
 	}
 
 	if (intent === "setRole") {
-		if (me.role !== "superadmin") {
+		const meIsTopadmin = me.role === "topadmin";
+		const meIsSuperadmin = me.role === "superadmin" || meIsTopadmin;
+		if (!meIsSuperadmin) {
 			return json<ActionData>({ formError: "只有超级管理员可以修改角色" }, { status: 403 });
-		}
-		if (target.role === "superadmin") {
-			return json<ActionData>({ formError: "不能修改超级管理员角色" }, { status: 400 });
 		}
 		const nextRole = normalizeRole(formData.get("role"));
 		if (!nextRole) {
 			return json<ActionData>({ formError: "无效的角色" }, { status: 400 });
 		}
-		if (nextRole === "superadmin") {
-			return json<ActionData>({ formError: "不能通过后台设置超级管理员" }, { status: 400 });
+
+		const password = getPasswordValue(formData.get("password"));
+		if (!password) {
+			return json<ActionData>({ formError: "需要二次验证密码" }, { status: 400 });
 		}
-		await execute(db, "UPDATE users SET role = ? WHERE id = ?", [nextRole, targetUserId]);
-		return redirect("/admin/users");
+		const verified = await verifyLogin(context, me.email, password);
+		if (!verified || verified.id !== me.id) {
+			return json<ActionData>({ formError: "二次验证失败" }, { status: 403 });
+		}
+
+		if (!meIsTopadmin) {
+			if (target.role === "superadmin" || target.role === "topadmin") {
+				return json<ActionData>({ formError: "不能修改超级管理员角色" }, { status: 400 });
+			}
+			if (nextRole === "superadmin" || nextRole === "topadmin") {
+				return json<ActionData>({ formError: "不能通过后台设置超级管理员" }, { status: 400 });
+			}
+		}
+
+		const prevRole = String(target.role || "user");
+		const highRisk = prevRole === "superadmin" || nextRole === "superadmin";
+		const now = Date.now();
+		const ip = getClientIp(request);
+		const userAgent = request.headers.get("User-Agent");
+
+		try {
+			await execute(db, "UPDATE users SET role = ? WHERE id = ?", [nextRole, targetUserId]);
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					me.id,
+					"user_role_updated",
+					ip,
+					userAgent,
+					JSON.stringify({
+						operatorUserId: me.id,
+						operatorRole: me.role,
+						targetUserId,
+						targetEmail: target.email,
+						prevRole,
+						nextRole,
+						highRisk,
+					}),
+					now,
+				],
+			);
+			if (highRisk) {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						me.id,
+						"superadmin_role_change_warning",
+						ip,
+						userAgent,
+						JSON.stringify({ operatorUserId: me.id, operatorRole: me.role, targetUserId, prevRole, nextRole }),
+						now,
+					],
+				);
+			}
+			return redirect("/admin/users");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						me.id,
+						"user_role_update_failed",
+						ip,
+						userAgent,
+						JSON.stringify({ operatorUserId: me.id, targetUserId, prevRole, nextRole, message }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			if (message.includes("no such table")) {
+				return json<ActionData>({ formError: "数据库未初始化：缺少必要的数据表" }, { status: 500 });
+			}
+			if (message.includes("no such column")) {
+				return json<ActionData>({ formError: "数据库未升级：请先应用最新迁移" }, { status: 500 });
+			}
+			return json<ActionData>({ formError: "修改角色失败，请稍后重试" }, { status: 500 });
+		}
 	}
 
 	if (intent === "toggleBan") {
@@ -194,7 +278,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		if (me.role === "admin" && target.role !== "user") {
 			return json<ActionData>({ formError: "管理员只能重置普通用户密码" }, { status: 403 });
 		}
-		if (target.role === "admin" && me.role !== "superadmin") {
+		if (target.role === "admin" && me.role !== "superadmin" && me.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以重置管理员密码" }, { status: 403 });
 		}
 
@@ -328,7 +412,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 
 	if (intent === "restoreUser") {
-		if (me.role !== "superadmin") {
+		if (me.role !== "superadmin" && me.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以恢复用户" }, { status: 403 });
 		}
 		if (!target.deletedAt) {
@@ -377,7 +461,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 
 	if (intent === "deleteBannedUser") {
-		if (me.role !== "superadmin") {
+		if (me.role !== "superadmin" && me.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以删除用户" }, { status: 403 });
 		}
 		if (!Boolean(target.isBanned)) {
@@ -623,7 +707,10 @@ export default function AdminUsersPage() {
 	const [filterMode, setFilterMode] = useState<"all" | "banned" | "deleted">("all");
 	const [now, setNow] = useState(() => Date.now());
 	const [dialogUser, setDialogUser] = useState<UserListItem | null>(null);
-	const [dialogIntent, setDialogIntent] = useState<"deleteBannedUser" | "restoreUser">("deleteBannedUser");
+	const [dialogIntent, setDialogIntent] = useState<"deleteBannedUser" | "restoreUser" | "setRole">(
+		"deleteBannedUser",
+	);
+	const [dialogNextRole, setDialogNextRole] = useState<UserRole>("user");
 	const [verifyPassword, setVerifyPassword] = useState("");
 	const [deleteMode, setDeleteMode] = useState<"soft" | "hard">("soft");
 	const [dialogSubmitting, setDialogSubmitting] = useState(false);
@@ -643,6 +730,7 @@ export default function AdminUsersPage() {
 		setDialogUser(null);
 		setVerifyPassword("");
 		setDeleteMode("soft");
+		setDialogNextRole("user");
 		setDialogSubmitting(false);
 	}, [actionData?.formError, dialogSubmitting, navigation.state]);
 
@@ -715,8 +803,8 @@ export default function AdminUsersPage() {
 								<span className="text-xs text-gray-500 dark:text-gray-400">在暂停期间，新用户无法注册</span>
 							</div>
 						</div>
-						{data.me.role === "superadmin" ? (
-							<Form method="post" className="flex items-center gap-2">
+					{data.me.role === "superadmin" || data.me.role === "topadmin" ? (
+						<Form method="post" className="flex items-center gap-2">
 								<input type="hidden" name="intent" value="setRegistrationPaused" />
 								<input type="hidden" name="paused" value={data.registrationPaused ? "0" : "1"} />
 								<button
@@ -731,7 +819,7 @@ export default function AdminUsersPage() {
 								</button>
 							</Form>
 						) : (
-							<span className="text-xs text-gray-500 dark:text-gray-400">只有超级管理员可修改</span>
+							<span className="text-xs text-gray-500 dark:text-gray-400">只有 superadmin/topadmin 可修改</span>
 						)}
 					</div>
 				</div>
@@ -780,18 +868,21 @@ export default function AdminUsersPage() {
 							{filtered.map((u) => {
 								const banned = Boolean(u.isBanned);
 								const deleted = Boolean(u.deletedAt);
-								const isSuperadmin = u.role === "superadmin";
+								const isTopadmin = u.role === "topadmin";
+								const isSuperadmin = u.role === "superadmin" || isTopadmin;
+								const meIsTopadmin = data.me.role === "topadmin";
+								const meIsSuperadmin = data.me.role === "superadmin" || meIsTopadmin;
 								const isSelf = u.id === data.me.id;
-								const canManageRole = data.me.role === "superadmin" && !isSuperadmin && !isSelf;
+								const canManageRole = meIsTopadmin ? !isSelf : data.me.role === "superadmin" && !isSuperadmin && !isSelf;
 								const canToggleBan = !isSelf && !isSuperadmin;
 								const canReset =
 									!isSelf &&
 									!isSuperadmin &&
-									(data.me.role === "superadmin" || u.role === "user");
+									(meIsSuperadmin || u.role === "user");
 								const canDeleteBanned =
-									data.me.role === "superadmin" && banned && !deleted && !isSelf && !isSuperadmin;
+									meIsSuperadmin && banned && !deleted && !isSelf && !isSuperadmin;
 								const canRestore =
-									data.me.role === "superadmin" && deleted && !isSelf && !isSuperadmin && now - (u.deletedAt ?? 0) <= 7 * 24 * 60 * 60 * 1000;
+									meIsSuperadmin && deleted && !isSelf && !isSuperadmin && now - (u.deletedAt ?? 0) <= 7 * 24 * 60 * 60 * 1000;
 								return (
 									<tr
 										key={u.id}
@@ -811,31 +902,26 @@ export default function AdminUsersPage() {
 										>
 											{u.email}
 										</td>
-										<td className="px-4 py-3">{u.displayName}</td>
-										<td className="px-4 py-3">
+									<td className="px-4 py-3">{u.displayName}</td>
+									<td className="px-4 py-3">
+										<div className="flex items-center gap-2">
+											<span className="text-gray-700 dark:text-gray-200">{u.role}</span>
 											{canManageRole ? (
-												<Form method="post" className="flex items-center gap-2">
-													<input type="hidden" name="intent" value="setRole" />
-													<input type="hidden" name="userId" value={u.id} />
-													<select
-														name="role"
-														defaultValue={u.role}
-														className="rounded border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-													>
-														<option value="user">user</option>
-														<option value="admin">admin</option>
-													</select>
-													<button
-														type="submit"
-														className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
-													>
-														保存
-													</button>
-												</Form>
-											) : (
-													<span className="text-gray-700 dark:text-gray-200">{u.role}</span>
-												)}
-											</td>
+												<button
+													type="button"
+													onClick={() => {
+														setDialogUser(u);
+														setDialogIntent("setRole");
+														setDialogNextRole(normalizeRole(u.role) ?? "user");
+														setVerifyPassword("");
+													}}
+													className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
+												>
+													修改
+												</button>
+											) : null}
+										</div>
+										</td>
 										<td className="px-4 py-3">
 											{deleted ? (
 												<span className="rounded bg-gray-200 px-2 py-1 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-100">已删除</span>
@@ -930,17 +1016,21 @@ export default function AdminUsersPage() {
 					</table>
 				</div>
 
-				{dialogUser ? (
-					<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-						<div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-lg dark:bg-gray-900">
-							<div className="flex items-start justify-between gap-4">
-								<div>
-									<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-										{dialogIntent === "deleteBannedUser" ? "删除用户" : "恢复用户"}
-									</h2>
-									<p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-										用户：{dialogUser.email}（ID {dialogUser.id}）
-									</p>
+			{dialogUser ? (
+				<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+					<div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-lg dark:bg-gray-900">
+						<div className="flex items-start justify-between gap-4">
+							<div>
+								<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+									{dialogIntent === "deleteBannedUser"
+										? "删除用户"
+										: dialogIntent === "restoreUser"
+											? "恢复用户"
+											: "修改角色"}
+								</h2>
+								<p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+									用户：{dialogUser.email}（ID {dialogUser.id}）
+								</p>
 								</div>
 								<button
 									type="button"
@@ -955,15 +1045,19 @@ export default function AdminUsersPage() {
 								</button>
 							</div>
 
-							{dialogIntent === "deleteBannedUser" ? (
-								<div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
-									该操作为高危操作：删除后将影响该用户及其关联数据。
-								</div>
-							) : (
-								<div className="mt-4 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
-									仅支持删除后 7 天内恢复。
-								</div>
-							)}
+						{dialogIntent === "deleteBannedUser" ? (
+							<div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+								该操作为高危操作：删除后将影响该用户及其关联数据。
+							</div>
+						) : dialogIntent === "restoreUser" ? (
+							<div className="mt-4 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
+								仅支持删除后 7 天内恢复。
+							</div>
+						) : (
+							<div className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+								该操作需要二次验证密码，并会记录审计日志。
+							</div>
+						)}
 
 							<Form
 								method="post"
@@ -978,6 +1072,44 @@ export default function AdminUsersPage() {
 							>
 								<input type="hidden" name="intent" value={dialogIntent} />
 								<input type="hidden" name="userId" value={dialogUser.id} />
+								{dialogIntent === "setRole" ? (
+									<>
+										{dialogUser.role === "superadmin" || dialogNextRole === "superadmin" ? (
+											<div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+												高危操作警告：对 superadmin 账户的等级调整会影响全站权限体系。
+											</div>
+										) : null}
+										<div className="flex flex-col gap-2">
+											<label
+												htmlFor="dialog_role"
+												className="text-sm font-medium text-gray-800 dark:text-gray-200"
+											>
+												目标角色
+											</label>
+											<select
+												id="dialog_role"
+												name="role"
+												value={dialogNextRole}
+												onChange={(e) => setDialogNextRole(e.target.value as UserRole)}
+												className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+											>
+												{data.me.role === "topadmin" ? (
+													<>
+														<option value="user">user</option>
+														<option value="admin">admin</option>
+														<option value="superadmin">superadmin</option>
+														<option value="topadmin">topadmin</option>
+													</>
+												) : (
+													<>
+														<option value="user">user</option>
+														<option value="admin">admin</option>
+													</>
+												)}
+											</select>
+										</div>
+									</>
+								) : null}
 								{dialogIntent === "deleteBannedUser" ? (
 									<div className="flex flex-col gap-2">
 										<div className="text-sm font-medium text-gray-800 dark:text-gray-200">删除方式</div>
@@ -1006,17 +1138,23 @@ export default function AdminUsersPage() {
 									</div>
 								) : null}
 
-								<div className="flex flex-col gap-2">
-									<label className="text-sm font-medium text-gray-800 dark:text-gray-200">二次验证密码</label>
-									<input
-										type="password"
-										name="password"
-										value={verifyPassword}
-										onChange={(e) => setVerifyPassword(e.target.value)}
-										placeholder="请输入你的账号密码"
-										className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
-									/>
-								</div>
+									<div className="flex flex-col gap-2">
+										<label
+											htmlFor="dialog_password"
+											className="text-sm font-medium text-gray-800 dark:text-gray-200"
+										>
+											二次验证密码
+										</label>
+										<input
+											type="password"
+											id="dialog_password"
+											name="password"
+											value={verifyPassword}
+											onChange={(e) => setVerifyPassword(e.target.value)}
+											placeholder="请输入你的账号密码"
+											className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+										/>
+									</div>
 
 								<div className="flex items-center justify-end gap-2">
 									<button
@@ -1034,16 +1172,22 @@ export default function AdminUsersPage() {
 										type="submit"
 										disabled={dialogSubmitting && navigation.state !== "idle"}
 										className={
-											dialogIntent === "deleteBannedUser"
+											dialogIntent === "deleteBannedUser" ||
+											(dialogIntent === "setRole" &&
+												(dialogUser.role === "superadmin" || dialogNextRole === "superadmin"))
 												? "rounded bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700"
-												: "rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+												: dialogIntent === "setRole"
+													? "rounded bg-amber-600 px-3 py-2 text-sm font-medium text-white hover:bg-amber-700"
+													: "rounded bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
 										}
 									>
 										{dialogSubmitting && navigation.state !== "idle"
 											? "处理中..."
 											: dialogIntent === "deleteBannedUser"
 												? "确认执行"
-												: "确认恢复"}
+												: dialogIntent === "restoreUser"
+													? "确认恢复"
+													: "确认修改"}
 									</button>
 								</div>
 							</Form>

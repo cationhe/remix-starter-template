@@ -18,7 +18,7 @@ type UserRecord = {
 	temp_password_expires_at?: number | null;
 };
 
-export type UserRole = "superadmin" | "admin" | "user";
+export type UserRole = "topadmin" | "superadmin" | "admin" | "user";
 
 export type AuthUser = {
 	id: number;
@@ -33,7 +33,11 @@ export type AuthUser = {
 };
 
 export function isAdmin(user: AuthUser) {
-	return user.role === "admin" || user.role === "superadmin";
+	return user.role === "admin" || user.role === "superadmin" || user.role === "topadmin";
+}
+
+export function isSuperadmin(user: AuthUser) {
+	return user.role === "superadmin" || user.role === "topadmin";
 }
 
 export function assertNotBanned(user: AuthUser) {
@@ -744,10 +748,33 @@ export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId
 		if (record.email.toLowerCase() !== superadminEmail) {
 			return;
 		}
-		if ((record.role as UserRole | undefined) === "superadmin") {
+		if ((record.role as UserRole | undefined) === "superadmin" || (record.role as UserRole | undefined) === "topadmin") {
 			return;
 		}
 		await execute(db, "UPDATE users SET role = 'superadmin' WHERE id = ?", [userId]);
+	} catch {
+		return;
+	}
+}
+
+export async function promoteToTopadminIfMatch(context: AppLoadContext, userId: number) {
+	try {
+		const topadminEmail = getEnvString(context, "TOPADMIN_EMAIL").toLowerCase();
+		if (!topadminEmail) {
+			return;
+		}
+		const db = getDBFromContext(context);
+		const record = await queryOne<UserRecord>(db, "SELECT * FROM users WHERE id = ?", [userId]);
+		if (!record) {
+			return;
+		}
+		if (record.email.toLowerCase() !== topadminEmail) {
+			return;
+		}
+		if ((record.role as UserRole | undefined) === "topadmin") {
+			return;
+		}
+		await execute(db, "UPDATE users SET role = 'topadmin' WHERE id = ?", [userId]);
 	} catch {
 		return;
 	}
@@ -842,7 +869,7 @@ export async function getDailyQuotaStatus(args: {
 		};
 	}
 
-	if (args.user.role === "admin" || args.user.role === "superadmin") {
+	if (args.user.role === "admin" || args.user.role === "superadmin" || args.user.role === "topadmin") {
 		return {
 			dayKey,
 			nextResetAt: endMs + 1,
@@ -950,7 +977,7 @@ export async function consumeDailyQuota(args: {
 	const ip = getClientIp(args.request);
 	const userAgent = args.request.headers.get("User-Agent");
 
-	if (args.user.role === "admin" || args.user.role === "superadmin") {
+	if (args.user.role === "admin" || args.user.role === "superadmin" || args.user.role === "topadmin") {
 		try {
 			const db = getDBFromContext(args.context);
 			const createdAt = now;

@@ -66,7 +66,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
 	const data = useLoaderData<typeof loader>();
 	const user = data.user;
-	const showAdmin = Boolean(user && (user.role === "admin" || user.role === "superadmin"));
+	const showAdmin = Boolean(user && (user.role === "admin" || user.role === "superadmin" || user.role === "topadmin"));
 	const isBanned = Boolean(user?.isBanned);
 	const unreadFetcher = useFetcher<{ unreadCount: number }>();
 	const unreadCount = user && !isBanned ? Number(unreadFetcher.data?.unreadCount ?? 0) : 0;
@@ -164,7 +164,7 @@ export default function App() {
 											>
 												限额管理
 											</Link>
-								{user.role === "superadmin" ? (
+								{user.role === "superadmin" || user.role === "topadmin" ? (
 									<>
 										<Link
 											to="/admin/nickname-requests"

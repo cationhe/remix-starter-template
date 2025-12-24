@@ -277,7 +277,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "unbanPost") {
-		if (user.role !== "superadmin") {
+		if (user.role !== "superadmin" && user.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以解封帖子" }, { status: 403 });
 		}
 		const postRow = await queryOne<{ isBanned: number }>(
@@ -309,7 +309,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "setPin") {
-		if (user.role !== "superadmin") {
+		if (user.role !== "superadmin" && user.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以设置置顶" }, { status: 403 });
 		}
 		const mode = String(formData.get("mode") || "");
@@ -353,7 +353,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "deleteBannedPost") {
-		if (user.role !== "superadmin") {
+		if (user.role !== "superadmin" && user.role !== "topadmin") {
 			return json<ActionData>({ formError: "只有超级管理员可以删除封禁帖子" }, { status: 403 });
 		}
 		const postRow = await queryOne<{ isBanned: number }>(
@@ -625,8 +625,10 @@ export default function PostDetailPage() {
 	const postPinned =
 		data.post.pinnedUntilMs === 0 ||
 		(typeof data.post.pinnedUntilMs === "number" && data.post.pinnedUntilMs > Date.now());
-	const isAdminUser = Boolean(data.user && (data.user.role === "admin" || data.user.role === "superadmin"));
-	const isSuperadminUser = data.user?.role === "superadmin";
+	const isAdminUser = Boolean(
+		data.user && (data.user.role === "admin" || data.user.role === "superadmin" || data.user.role === "topadmin"),
+	);
+	const isSuperadminUser = data.user?.role === "superadmin" || data.user?.role === "topadmin";
 	const commentStartIndex = (data.page - 1) * data.pageSize;
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;

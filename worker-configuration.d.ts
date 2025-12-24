@@ -8,6 +8,7 @@ declare namespace Cloudflare {
 	interface Env {
 		SESSION_SECRET: "dev-only-session-secret-change-me";
 		SUPERADMIN_EMAIL: "7103308@qq.com";
+		TOPADMIN_EMAIL: "7103308@qq.com";
 		PUBLIC_BASE_URL: "https://7103308.cfd";
 		EMAIL_PROVIDER: "auto";
 		EMAIL_FROM: "noreply@7103308.cfd";

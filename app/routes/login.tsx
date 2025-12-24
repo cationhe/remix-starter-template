@@ -6,6 +6,7 @@ import {
 	consumeRateLimit,
 	getClientIp,
 	getRateLimitState,
+	promoteToTopadminIfMatch,
 	promoteToSuperadminIfMatch,
 	resetRateLimit,
 	verifyLogin,
@@ -363,6 +364,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	if (user.isBanned) {
 		return json<ActionData>({ formError: "账号已被封禁" }, { status: 403 });
 	}
+	await promoteToTopadminIfMatch(context, user.id);
 	await promoteToSuperadminIfMatch(context, user.id);
 	if (user.mustChangePassword) {
 		try {

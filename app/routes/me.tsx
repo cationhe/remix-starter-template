@@ -212,7 +212,7 @@ export default function MePage() {
 
 	function formatQuotaPart(args: { used: number; limit: number | null; remaining: number | null }) {
 		if (args.limit === null) {
-			if (me.role === "admin" || me.role === "superadmin") {
+			if (me.role === "admin" || me.role === "superadmin" || me.role === "topadmin") {
 				return `已用 ${args.used}（不限额）`;
 			}
 			return "暂不可用";
@@ -585,7 +585,7 @@ export default function MePage() {
 							<p>
 								如需临时提高额度，可在 <Link to="/messages" className="underline">消息中心</Link> 给管理员发送申请。
 							</p>
-							{me.role === "admin" || me.role === "superadmin" ? (
+							{me.role === "admin" || me.role === "superadmin" || me.role === "topadmin" ? (
 								<p>
 									可在 <Link to="/admin/quotas" className="underline">限额管理</Link> 为用户设置临时限额（有有效期）。
 								</p>

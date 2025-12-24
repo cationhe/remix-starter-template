@@ -23,7 +23,7 @@ type ActionData =
 export async function action({ request, context, params }: ActionFunctionArgs) {
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
-	const isSuperadminUser = user.role === "superadmin";
+	const isSuperadminUser = user.role === "superadmin" || user.role === "topadmin";
 
 	const rawId = params.id;
 	const commentId = rawId ? Number(rawId) : NaN;
