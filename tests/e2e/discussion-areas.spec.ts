@@ -302,3 +302,98 @@ test("置顶作用域：置顶只在所属讨论区内生效；隐藏区普通�
 	expect(forced.status).toBe(403);
 	expect(forced.text).toContain("该讨论区已隐藏");
 });
+
+test("讨论区详情页：可从讨论区名称进入，支持分页与搜索", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const superadminEmail = "7103308@qq.com";
+	const superadminPassword = "Admin123";
+	const areaName = `详情页区_${Date.now()}`;
+
+	await registerOrLogin(page, { email: superadminEmail, displayName: "superadmin", password: superadminPassword });
+	await page.goto("/admin/discussion-areas", { waitUntil: "domcontentloaded" });
+	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
+	await page.getByPlaceholder("例如：综合讨论").fill(areaName);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, areaName);
+	const row = await getAreaRowByName(page, areaName);
+	const areaId = Number(await row.locator('input[name="areaId"]').inputValue());
+	expect(Number.isFinite(areaId)).toBeTruthy();
+	const base = Date.now();
+	const specialKeyword = `special_kw_${base}`;
+	const titles = Array.from({ length: 23 }, (_, i) => `分页帖_${base}_${i}`);
+	await page.evaluate(
+		async ({ areaId, titles, specialKeyword }) => {
+			for (let i = 0; i < titles.length; i++) {
+				const body = new URLSearchParams();
+				body.set("areaId", String(areaId));
+				body.set("title", titles[i]);
+				body.set("content", i === 10 ? `hello ${specialKeyword} world` : `content_${i}`);
+				const resp = await fetch("/posts/new", {
+					method: "POST",
+					headers: { "Content-Type": "application/x-www-form-urlencoded" },
+					body,
+				});
+				if (resp.status >= 400) {
+					throw new Error(`unexpected status: ${resp.status}`);
+				}
+			}
+		},
+		{ areaId, titles, specialKeyword },
+	);
+
+	await page.goto("/posts", { waitUntil: "domcontentloaded" });
+	await page.getByRole("link", { name: areaName }).click();
+	await expect(page).toHaveURL(new RegExp(`/areas/${areaId}(\\?.*)?$`));
+	await expect(page.getByRole("heading", { name: areaName })).toBeVisible();
+	await expect(page.getByText("第 1 / 2 页")).toBeVisible();
+	await expect(page.locator("ul > li")).toHaveCount(20);
+	await expect(page.getByRole("link", { name: titles[titles.length - 1] })).toBeVisible();
+
+	await page.getByRole("link", { name: "下一页" }).click();
+	await expect(page).toHaveURL(new RegExp(`/areas/${areaId}\\?page=2`));
+	await expect(page.getByText("第 2 / 2 页")).toBeVisible();
+	await expect(page.locator("ul > li")).toHaveCount(3);
+
+	await page.getByPlaceholder("搜索标题或内容").fill(specialKeyword);
+	await page.getByRole("button", { name: "搜索" }).click();
+	await expect(page).toHaveURL(new RegExp(`/areas/${areaId}\\?.*q=`));
+	await expect(page.getByText("共 1 帖")).toBeVisible();
+	await expect(page.locator("ul > li")).toHaveCount(1);
+	await expect(page.getByRole("link", { name: titles[10] })).toBeVisible();
+	await page.getByRole("link", { name: titles[10] }).click();
+	await expect(page).toHaveURL(/\/posts\//);
+});
+
+test("讨论区详情页：隐藏讨论区普通用户访问返回404", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const superadminEmail = "7103308@qq.com";
+	const superadminPassword = "Admin123";
+	const hiddenArea = `隐藏详情页区_${Date.now()}`;
+
+	await registerOrLogin(page, { email: superadminEmail, displayName: "superadmin", password: superadminPassword });
+	await page.goto("/admin/discussion-areas", { waitUntil: "domcontentloaded" });
+	await page.getByPlaceholder("例如：综合讨论").fill(hiddenArea);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, hiddenArea);
+	const hiddenRow = await getAreaRowByName(page, hiddenArea);
+	const hiddenAreaId = Number(await hiddenRow.locator('input[name="areaId"]').inputValue());
+	await hiddenRow.getByRole("button", { name: "设为隐藏" }).click();
+	await expect(page.getByRole("heading", { name: "修改可见性" })).toBeVisible();
+	await page.locator('input[name="password"]').fill(superadminPassword);
+	await page.getByRole("button", { name: "确认执行" }).click();
+	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
+	const hiddenRowAfter = await getAreaRowByName(page, hiddenArea);
+	await expect(hiddenRowAfter.locator("td").nth(3).getByText("隐藏", { exact: true })).toBeVisible();
+
+	await page.goto("/logout", { waitUntil: "domcontentloaded" });
+	await expect(page).toHaveURL(/\/$/);
+	await page.context().clearCookies();
+	const email = `e2e_area_user_${Date.now()}@example.com`;
+	await registerOrLogin(page, { email, displayName: "e2e_area_user", password: "User1234" });
+	const resp = await page.goto(`/areas/${hiddenAreaId}`, { waitUntil: "domcontentloaded" });
+	expect(resp?.status()).toBe(404);
+});

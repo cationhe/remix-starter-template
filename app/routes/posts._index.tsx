@@ -150,7 +150,14 @@ export default function PostsIndex() {
 							<section key={area.id} className="overflow-hidden rounded-xl bg-white shadow dark:bg-gray-800">
 								<div className="flex items-center justify-between px-6 py-4">
 									<div className="flex items-center gap-2">
-										<h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{area.name}</h2>
+										<h2 className="text-base font-semibold">
+											<Link
+												to={`/areas/${area.id}`}
+												className="text-blue-700 hover:underline dark:text-blue-400"
+											>
+												{area.name}
+											</Link>
+										</h2>
 										{area.isHidden ? (
 											<span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-100">
 												隐藏
