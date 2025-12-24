@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Form, Link, useLoaderData } from "@remix-run/react";
+import { Form, Link, isRouteErrorResponse, useLoaderData, useLocation, useNavigation, useRouteError } from "@remix-run/react";
 import { findUserById } from "~/lib/auth.server";
 import { getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
@@ -32,13 +32,17 @@ type LoaderData = {
 	totalPages: number;
 };
 
-function clampPage(value: string | null, totalPages: number) {
+const FIXED_PAGE_SIZE = 20;
+
+function parsePositiveInt(value: string | null) {
 	const raw = String(value ?? "").trim();
+	if (!raw) return null;
 	const n = Number(raw);
-	const page = Number.isFinite(n) ? Math.floor(n) : 1;
-	const safe = page <= 0 ? 1 : page;
-	if (totalPages <= 0) return 1;
-	return safe > totalPages ? totalPages : safe;
+	if (!Number.isFinite(n)) return null;
+	const int = Math.floor(n);
+	if (String(int) !== raw && String(n) !== raw) return null;
+	if (int <= 0) return null;
+	return int;
 }
 
 function normalizeQuery(value: string | null) {
@@ -86,7 +90,16 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	const url = new URL(request.url);
 	const q = normalizeQuery(url.searchParams.get("q"));
-	const pageSize = 20;
+	const pageSizeRaw = url.searchParams.get("pageSize");
+	const requestedPageSize = pageSizeRaw ? parsePositiveInt(pageSizeRaw) : FIXED_PAGE_SIZE;
+	if (!requestedPageSize) {
+		throw new Response("pageSize 参数无效", { status: 400 });
+	}
+	if (requestedPageSize !== FIXED_PAGE_SIZE) {
+		throw new Response("pageSize 固定为 20", { status: 400 });
+	}
+	const pageSize = FIXED_PAGE_SIZE;
+	const requestedPage = parsePositiveInt(url.searchParams.get("page")) ?? 1;
 	const where: string[] = ["p.area_id = ?"];
 	const whereArgs: Array<string | number> = [areaId];
 	if (q) {
@@ -103,7 +116,10 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	);
 	const totalCount = Number(countRow?.count ?? 0);
 	const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-	const page = clampPage(url.searchParams.get("page"), totalPages);
+	if (requestedPage > totalPages) {
+		throw new Response(`页码超出范围（总页数：${totalPages}）`, { status: 400 });
+	}
+	const page = requestedPage;
 	const offset = (page - 1) * pageSize;
 	const now = Date.now();
 
@@ -152,7 +168,8 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		};
 	});
 
-	return json<LoaderData>({
+	return json<LoaderData>(
+		{
 		user,
 		area,
 		posts,
@@ -161,18 +178,27 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		pageSize,
 		totalCount,
 		totalPages,
-	});
+		},
+		{ headers: { "Cache-Control": "private, max-age=30" } },
+	);
 }
 
 export default function AreaPostsPage() {
 	const data = useLoaderData<typeof loader>();
+	const navigation = useNavigation();
 	const now = Date.now();
 	const hasPrev = data.page > 1;
 	const hasNext = data.page < data.totalPages;
+	const isLoading = navigation.state !== "idle";
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
 			<div className="mx-auto flex max-w-3xl flex-col gap-6">
 				<header className="flex flex-col gap-2">
+					{isLoading ? (
+						<div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
+							正在加载…
+						</div>
+					) : null}
 					<div className="flex items-start justify-between gap-4">
 						<div>
 							<div className="flex items-center gap-2">
@@ -196,7 +222,11 @@ export default function AreaPostsPage() {
 							placeholder="搜索标题或内容"
 							className="w-full flex-1 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
 						/>
-						<button type="submit" className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+						<button
+							type="submit"
+							disabled={navigation.state === "submitting"}
+							className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+						>
 							搜索
 						</button>
 						{data.q ? (
@@ -253,6 +283,7 @@ export default function AreaPostsPage() {
 						{hasPrev ? (
 							<Link
 								to={`/areas/${data.area.id}${buildQueryString({ q: data.q, page: data.page - 1 })}`}
+								prefetch="intent"
 								className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 							>
 								上一页
@@ -263,6 +294,7 @@ export default function AreaPostsPage() {
 						{hasNext ? (
 							<Link
 								to={`/areas/${data.area.id}${buildQueryString({ q: data.q, page: data.page + 1 })}`}
+								prefetch="intent"
 								className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 							>
 								下一页
@@ -277,3 +309,40 @@ export default function AreaPostsPage() {
 	);
 }
 
+export function ErrorBoundary() {
+	const error = useRouteError();
+	const location = useLocation();
+	let message = "页面加载失败，请稍后重试";
+	let status: number | null = null;
+	if (isRouteErrorResponse(error)) {
+		status = error.status;
+		message = String(error.data || error.statusText || message);
+	} else if (error instanceof Error) {
+		message = error.message || message;
+	}
+
+	const match = location.pathname.match(/^\/areas\/(\d+)/);
+	const fallbackTo = match ? `/areas/${match[1]}` : "/posts";
+	return (
+		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
+			<div className="mx-auto flex max-w-3xl flex-col gap-4">
+				<div className="rounded-xl border border-red-200 bg-red-50 p-6 text-sm text-red-700 shadow dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+					<div className="font-medium">{status ? `错误 ${status}` : "错误"}</div>
+					<div className="mt-2 break-words">{message}</div>
+					<div className="mt-4 flex flex-wrap items-center gap-3">
+						<Link
+							to={`${location.pathname}${location.search}`}
+							prefetch="intent"
+							className="rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700"
+						>
+							重试
+						</Link>
+						<Link to={fallbackTo} className="text-sm text-blue-600 hover:underline dark:text-blue-400">
+							返回
+						</Link>
+					</div>
+				</div>
+			</div>
+		</div>
+	);
+}
