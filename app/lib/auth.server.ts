@@ -753,6 +753,302 @@ export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId
 	}
 }
 
+type DailyQuotaKind = "post" | "comment";
+
+type DailyQuotaConsumeResult =
+	| {
+			ok: true;
+			kind: DailyQuotaKind;
+			dayKey: number;
+			limit: number | null;
+			remaining: number | null;
+	  }
+	| {
+			ok: false;
+			kind: DailyQuotaKind;
+			status: number;
+			message: string;
+			dayKey: number;
+			limit: number | null;
+	  };
+
+function getChinaDayInfo(nowMs: number) {
+	const offsetMs = 8 * 60 * 60 * 1000;
+	const shifted = new Date(nowMs + offsetMs);
+	const year = shifted.getUTCFullYear();
+	const month = shifted.getUTCMonth() + 1;
+	const day = shifted.getUTCDate();
+	const dayKey = year * 10000 + month * 100 + day;
+	const startMs = Date.UTC(year, month - 1, day) - offsetMs;
+	const endMs = Date.UTC(year, month - 1, day + 1) - offsetMs - 1;
+	return { dayKey, startMs, endMs };
+}
+
+async function logQuotaEvent(args: {
+	context: AppLoadContext;
+	operatorUserId: number;
+	eventType: string;
+	ip: string | null;
+	userAgent: string | null;
+	metadata: Record<string, unknown>;
+}) {
+	try {
+		await execute(
+			getDBFromContext(args.context),
+			"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			[
+				args.operatorUserId,
+				args.eventType,
+				args.ip,
+				args.userAgent,
+				JSON.stringify(args.metadata),
+				Date.now(),
+			],
+		);
+	} catch {
+		return;
+	}
+}
+
+export async function consumeDailyQuota(args: {
+	context: AppLoadContext;
+	request: Request;
+	user: AuthUser;
+	kind: DailyQuotaKind;
+	now?: number;
+}): Promise<DailyQuotaConsumeResult> {
+	const now = typeof args.now === "number" ? args.now : Date.now();
+	const { dayKey, endMs } = getChinaDayInfo(now);
+	const ip = getClientIp(args.request);
+	const userAgent = args.request.headers.get("User-Agent");
+
+	if (args.user.role === "admin" || args.user.role === "superadmin") {
+		try {
+			const db = getDBFromContext(args.context);
+			const createdAt = now;
+			if (args.kind === "post") {
+				await execute(
+					db,
+					"INSERT INTO daily_user_activity (user_id, day_key, post_count, comment_count, last_post_at, last_comment_at, created_at, updated_at) VALUES (?, ?, 1, 0, ?, NULL, ?, ?) ON CONFLICT(user_id, day_key) DO UPDATE SET post_count = daily_user_activity.post_count + 1, last_post_at = excluded.last_post_at, updated_at = excluded.updated_at",
+					[args.user.id, dayKey, now, createdAt, createdAt],
+				);
+			} else {
+				await execute(
+					db,
+					"INSERT INTO daily_user_activity (user_id, day_key, post_count, comment_count, last_post_at, last_comment_at, created_at, updated_at) VALUES (?, ?, 0, 1, NULL, ?, ?, ?) ON CONFLICT(user_id, day_key) DO UPDATE SET comment_count = daily_user_activity.comment_count + 1, last_comment_at = excluded.last_comment_at, updated_at = excluded.updated_at",
+					[args.user.id, dayKey, now, createdAt, createdAt],
+				);
+			}
+		} catch {
+		}
+		return { ok: true, kind: args.kind, dayKey, limit: null, remaining: null };
+	}
+
+	const spamKey = `spam:${args.kind}:user:${args.user.id}`;
+	const spamConfig =
+		args.kind === "post"
+			? ({ windowMs: 60_000, max: 6, blockMs: 5 * 60_000 } as const)
+			: ({ windowMs: 60_000, max: 25, blockMs: 5 * 60_000 } as const);
+	try {
+		const spam = await consumeRateLimit(args.context, spamKey, spamConfig, now);
+		if (!spam.allowed) {
+			await logQuotaEvent({
+				context: args.context,
+				operatorUserId: args.user.id,
+				eventType: "spam_rate_limited",
+				ip,
+				userAgent,
+				metadata: {
+					kind: args.kind,
+					key: spamKey,
+					count: spam.count,
+					blockedUntil: spam.blockedUntil,
+				},
+			});
+			return {
+				ok: false,
+				kind: args.kind,
+				status: 429,
+				message: "操作过于频繁，请稍后再试",
+				dayKey,
+				limit: null,
+			};
+		}
+	} catch {
+	}
+
+	const defaults = { post: 10, comment: 20 };
+	let limit = args.kind === "post" ? defaults.post : defaults.comment;
+	let activeOverrideId: number | null = null;
+	try {
+		const db = getDBFromContext(args.context);
+		const row = await queryOne<{
+			id: number;
+			postLimit: number | null;
+			commentLimit: number | null;
+			startsAtMs: number;
+			endsAtMs: number;
+		}>(
+			db,
+			"SELECT id as id, post_limit as postLimit, comment_limit as commentLimit, starts_at_ms as startsAtMs, ends_at_ms as endsAtMs FROM user_daily_quota_overrides WHERE user_id = ? AND revoked_at IS NULL AND starts_at_ms <= ? AND ends_at_ms >= ? ORDER BY created_at DESC, id DESC LIMIT 1",
+			[args.user.id, now, now],
+		);
+		if (row) {
+			activeOverrideId = row.id;
+			if (args.kind === "post" && typeof row.postLimit === "number") {
+				limit = row.postLimit;
+			}
+			if (args.kind === "comment" && typeof row.commentLimit === "number") {
+				limit = row.commentLimit;
+			}
+		}
+	} catch {
+	}
+
+	if (!Number.isFinite(limit) || limit < 0) {
+		limit = args.kind === "post" ? defaults.post : defaults.comment;
+	}
+
+	if (limit <= 0) {
+		await logQuotaEvent({
+			context: args.context,
+			operatorUserId: args.user.id,
+			eventType: "daily_quota_exceeded",
+			ip,
+			userAgent,
+			metadata: {
+				kind: args.kind,
+				dayKey,
+				limit,
+				count: 0,
+				overrideId: activeOverrideId,
+			},
+		});
+		return {
+			ok: false,
+			kind: args.kind,
+			status: 429,
+			message: `今日${args.kind === "post" ? "发帖" : "评论"}已达上限（${limit} 条），请明天再试`,
+			dayKey,
+			limit,
+		};
+	}
+
+	try {
+		const db = getDBFromContext(args.context);
+		const createdAt = now;
+		if (args.kind === "post") {
+			const result = await execute(
+				db,
+				"INSERT INTO daily_user_activity (user_id, day_key, post_count, comment_count, last_post_at, last_comment_at, created_at, updated_at) VALUES (?, ?, 1, 0, ?, NULL, ?, ?) ON CONFLICT(user_id, day_key) DO UPDATE SET post_count = daily_user_activity.post_count + 1, last_post_at = excluded.last_post_at, updated_at = excluded.updated_at WHERE daily_user_activity.post_count < ?",
+				[args.user.id, dayKey, now, createdAt, createdAt, limit],
+			);
+			const changed = Number((result as any)?.meta?.changes ?? 0);
+			if (changed > 0) {
+				return { ok: true, kind: args.kind, dayKey, limit, remaining: null };
+			}
+			const row = await queryOne<{ count: number | string }>(
+				db,
+				"SELECT post_count as count FROM daily_user_activity WHERE user_id = ? AND day_key = ?",
+				[args.user.id, dayKey],
+			);
+			const count = Number(row?.count ?? limit);
+			await logQuotaEvent({
+				context: args.context,
+				operatorUserId: args.user.id,
+				eventType: "daily_quota_exceeded",
+				ip,
+				userAgent,
+				metadata: {
+					kind: args.kind,
+					dayKey,
+					limit,
+					count,
+					overrideId: activeOverrideId,
+					nextResetAt: endMs + 1,
+				},
+			});
+			return {
+				ok: false,
+				kind: args.kind,
+				status: 429,
+				message: `今日发帖已达上限（${limit} 条），请明天再试`,
+				dayKey,
+				limit,
+			};
+		}
+
+		const result = await execute(
+			db,
+			"INSERT INTO daily_user_activity (user_id, day_key, post_count, comment_count, last_post_at, last_comment_at, created_at, updated_at) VALUES (?, ?, 0, 1, NULL, ?, ?, ?) ON CONFLICT(user_id, day_key) DO UPDATE SET comment_count = daily_user_activity.comment_count + 1, last_comment_at = excluded.last_comment_at, updated_at = excluded.updated_at WHERE daily_user_activity.comment_count < ?",
+			[args.user.id, dayKey, now, createdAt, createdAt, limit],
+		);
+		const changed = Number((result as any)?.meta?.changes ?? 0);
+		if (changed > 0) {
+			return { ok: true, kind: args.kind, dayKey, limit, remaining: null };
+		}
+		const row = await queryOne<{ count: number | string }>(
+			db,
+			"SELECT comment_count as count FROM daily_user_activity WHERE user_id = ? AND day_key = ?",
+			[args.user.id, dayKey],
+		);
+		const count = Number(row?.count ?? limit);
+		await logQuotaEvent({
+			context: args.context,
+			operatorUserId: args.user.id,
+			eventType: "daily_quota_exceeded",
+			ip,
+			userAgent,
+			metadata: {
+				kind: args.kind,
+				dayKey,
+				limit,
+				count,
+				overrideId: activeOverrideId,
+				nextResetAt: endMs + 1,
+			},
+		});
+		return {
+			ok: false,
+			kind: args.kind,
+			status: 429,
+			message: `今日评论已达上限（${limit} 条），请明天再试`,
+			dayKey,
+			limit,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such table")) {
+			return {
+				ok: false,
+				kind: args.kind,
+				status: 500,
+				message: "数据库未升级：缺少限额相关数据表",
+				dayKey,
+				limit,
+			};
+		}
+		if (message.includes("no such column")) {
+			return {
+				ok: false,
+				kind: args.kind,
+				status: 500,
+				message: "数据库未升级：缺少限额相关字段",
+				dayKey,
+				limit,
+			};
+		}
+		return {
+			ok: false,
+			kind: args.kind,
+			status: 500,
+			message: "限额检查失败，请稍后重试",
+			dayKey,
+			limit,
+		};
+	}
+}
+
 type RateLimitConfig = {
 	windowMs: number;
 	max: number;

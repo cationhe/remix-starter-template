@@ -2,7 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
-import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { assertNotBanned, consumeDailyQuota, requireUser } from "~/lib/auth.server";
 
 type AreaListItem = {
 	id: number;
@@ -82,6 +82,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		}
 		if (area.isHidden && user.role !== "superadmin") {
 			return json<ActionData>({ fields, formError: "该讨论区已隐藏，无法发帖" }, { status: 403 });
+		}
+		const quota = await consumeDailyQuota({ context, request, user, kind: "post" });
+		if (!quota.ok) {
+			return json<ActionData>({ fields, formError: quota.message }, { status: quota.status });
 		}
 		const createdAt = Date.now();
 		await execute(

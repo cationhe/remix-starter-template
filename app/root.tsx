@@ -144,25 +144,31 @@ export default function App() {
 										</span>
 									) : null}
 								</Link>
-								<Link
-									to="/me"
-									className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-								>
-									个人中心
-								</Link>
-								{showAdmin ? (
-									<>
-										<Link
-											to="/admin/users"
-											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-										>
-											用户管理
-										</Link>
-										{user.role === "superadmin" ? (
-											<>
-												<Link
-													to="/admin/discussion-areas"
-													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									<Link
+										to="/me"
+										className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									>
+										个人中心
+									</Link>
+									{showAdmin ? (
+										<>
+											<Link
+												to="/admin/users"
+												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+											>
+												用户管理
+											</Link>
+											<Link
+												to="/admin/quotas"
+												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+											>
+												限额管理
+											</Link>
+											{user.role === "superadmin" ? (
+												<>
+													<Link
+														to="/admin/discussion-areas"
+												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 												>
 													讨论区管理
 												</Link>

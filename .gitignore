@@ -109,6 +109,13 @@ web_modules/
 # Optional stylelint cache
 .stylelintcache
 
+# 本地开发记录
+record.md
+
+# Playwright
+test-results/
+playwright-report/
+
 # Microbundle cache
 .rpt2_cache/
 .rts2_cache_cjs/

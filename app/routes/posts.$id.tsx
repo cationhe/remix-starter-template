@@ -7,6 +7,7 @@ import { getSession } from "~/lib/session.server";
 import {
 	assertAdmin,
 	assertNotBanned,
+	consumeDailyQuota,
 	findUserById,
 	getClientIp,
 	requireUser,
@@ -598,6 +599,10 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ fieldErrors }, { status: 400 });
 	}
 	try {
+		const quota = await consumeDailyQuota({ context, request, user, kind: "comment" });
+		if (!quota.ok) {
+			return json<ActionData>({ formError: quota.message }, { status: quota.status });
+		}
 		const createdAt = Date.now();
 		await execute(
 			db,
