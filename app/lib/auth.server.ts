@@ -755,6 +755,22 @@ export async function promoteToSuperadminIfMatch(context: AppLoadContext, userId
 
 type DailyQuotaKind = "post" | "comment";
 
+export type DailyQuotaStatus = {
+	dayKey: number;
+	nextResetAt: number;
+	overrideId: number | null;
+	post: {
+		used: number;
+		limit: number | null;
+		remaining: number | null;
+	};
+	comment: {
+		used: number;
+		limit: number | null;
+		remaining: number | null;
+	};
+};
+
 type DailyQuotaConsumeResult =
 	| {
 			ok: true;
@@ -782,6 +798,118 @@ function getChinaDayInfo(nowMs: number) {
 	const startMs = Date.UTC(year, month - 1, day) - offsetMs;
 	const endMs = Date.UTC(year, month - 1, day + 1) - offsetMs - 1;
 	return { dayKey, startMs, endMs };
+}
+
+export async function getDailyQuotaStatus(args: {
+	context: AppLoadContext;
+	user: AuthUser;
+	now?: number;
+}): Promise<DailyQuotaStatus> {
+	const now = typeof args.now === "number" ? args.now : Date.now();
+	const { dayKey, endMs } = getChinaDayInfo(now);
+	const db = getDBFromContext(args.context);
+	let schemaReady = true;
+
+	let usedPost = 0;
+	let usedComment = 0;
+	try {
+		const activity = await queryOne<{
+			postCount: number | string;
+			commentCount: number | string;
+		}>(
+			db,
+			"SELECT post_count as postCount, comment_count as commentCount FROM daily_user_activity WHERE user_id = ? AND day_key = ?",
+			[args.user.id, dayKey],
+		);
+		usedPost = Number(activity?.postCount ?? 0);
+		usedComment = Number(activity?.commentCount ?? 0);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such table") || message.includes("no such column")) {
+			schemaReady = false;
+		}
+		usedPost = 0;
+		usedComment = 0;
+	}
+
+	if (!schemaReady) {
+		return {
+			dayKey,
+			nextResetAt: endMs + 1,
+			overrideId: null,
+			post: { used: 0, limit: null, remaining: null },
+			comment: { used: 0, limit: null, remaining: null },
+		};
+	}
+
+	if (args.user.role === "admin" || args.user.role === "superadmin") {
+		return {
+			dayKey,
+			nextResetAt: endMs + 1,
+			overrideId: null,
+			post: { used: usedPost, limit: null, remaining: null },
+			comment: { used: usedComment, limit: null, remaining: null },
+		};
+	}
+
+	const defaults = { post: 10, comment: 20 };
+	let postLimit = defaults.post;
+	let commentLimit = defaults.comment;
+	let overrideId: number | null = null;
+	try {
+		const row = await queryOne<{
+			id: number;
+			postLimit: number | null;
+			commentLimit: number | null;
+		}>(
+			db,
+			"SELECT id as id, post_limit as postLimit, comment_limit as commentLimit FROM user_daily_quota_overrides WHERE user_id = ? AND revoked_at IS NULL AND starts_at_ms <= ? AND ends_at_ms >= ? ORDER BY created_at DESC, id DESC LIMIT 1",
+			[args.user.id, now, now],
+		);
+		if (row) {
+			overrideId = row.id;
+			if (typeof row.postLimit === "number") {
+				postLimit = row.postLimit;
+			}
+			if (typeof row.commentLimit === "number") {
+				commentLimit = row.commentLimit;
+			}
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such table") || message.includes("no such column")) {
+			schemaReady = false;
+		}
+		overrideId = null;
+	}
+
+	if (!schemaReady) {
+		return {
+			dayKey,
+			nextResetAt: endMs + 1,
+			overrideId: null,
+			post: { used: 0, limit: null, remaining: null },
+			comment: { used: 0, limit: null, remaining: null },
+		};
+	}
+
+	if (!Number.isFinite(postLimit) || postLimit < 0) {
+		postLimit = defaults.post;
+	}
+	if (!Number.isFinite(commentLimit) || commentLimit < 0) {
+		commentLimit = defaults.comment;
+	}
+
+	const remainingPost = Math.max(0, postLimit - usedPost);
+	const remainingComment = Math.max(0, commentLimit - usedComment);
+
+	return {
+		dayKey,
+		nextResetAt: endMs + 1,
+		overrideId,
+		post: { used: usedPost, limit: postLimit, remaining: remainingPost },
+		comment: { used: usedComment, limit: commentLimit, remaining: remainingComment },
+	};
 }
 
 async function logQuotaEvent(args: {
