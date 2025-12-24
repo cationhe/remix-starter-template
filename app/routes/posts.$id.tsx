@@ -112,7 +112,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const db = getDBFromContext(context);
 	const post = await queryOne<PostDetail>(
 		db,
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ?",
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
 		[id],
 	);
 	if (!post) {
@@ -121,7 +121,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	const commentCountRow = await queryOne<{ count: number | string }>(
 		db,
-		"SELECT COUNT(1) as count FROM comments WHERE post_id = ?",
+		"SELECT COUNT(1) as count FROM comments WHERE post_id = ? AND deleted_at IS NULL",
 		[id],
 	);
 	const commentCount = Number(commentCountRow?.count ?? 0);
@@ -148,7 +148,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	const comments = await queryAll<CommentItem>(
 		db,
-		"SELECT comments.id as id, comments.content as content, comments.created_at as createdAt, comments.author_id as authorId, users.display_name as authorName FROM comments JOIN users ON comments.author_id = users.id WHERE comments.post_id = ? ORDER BY comments.created_at ASC LIMIT ? OFFSET ?",
+		"SELECT comments.id as id, comments.content as content, comments.created_at as createdAt, comments.author_id as authorId, users.display_name as authorName FROM comments JOIN users ON comments.author_id = users.id WHERE comments.post_id = ? AND comments.deleted_at IS NULL ORDER BY comments.created_at ASC LIMIT ? OFFSET ?",
 		[id, pageSize, offset],
 	);
 
@@ -210,7 +210,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		const postRow = await queryOne<{ authorId: number; isBanned: number }>(
 			db,
-			"SELECT author_id as authorId, is_banned as isBanned FROM posts WHERE id = ?",
+			"SELECT author_id as authorId, is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 		if (!postRow) {
@@ -281,7 +281,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		const postRow = await queryOne<{ isBanned: number }>(
 			db,
-			"SELECT is_banned as isBanned FROM posts WHERE id = ?",
+			"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 		if (!postRow) {
@@ -291,11 +291,11 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			return json<ActionData>({ formError: "帖子未封禁" }, { status: 400 });
 		}
 		const now = Date.now();
-		await execute(
-			db,
-			"UPDATE posts SET is_banned = 0, banned_at = NULL, banned_by = NULL, banned_reason = NULL WHERE id = ?",
-			[postId],
-		);
+			await execute(
+				db,
+				"UPDATE posts SET is_banned = 0, banned_at = NULL, banned_by = NULL, banned_reason = NULL WHERE id = ? AND deleted_at IS NULL",
+				[postId],
+			);
 		try {
 			await execute(
 				db,
@@ -330,13 +330,13 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		if (pinnedUntilMs === null) {
 			await execute(
 				db,
-				"UPDATE posts SET pinned_until_ms = NULL, pinned_at = NULL, pinned_by = NULL WHERE id = ?",
+				"UPDATE posts SET pinned_until_ms = NULL, pinned_at = NULL, pinned_by = NULL WHERE id = ? AND deleted_at IS NULL",
 				[postId],
 			);
 		} else {
 			await execute(
 				db,
-				"UPDATE posts SET pinned_until_ms = ?, pinned_at = ?, pinned_by = ? WHERE id = ?",
+				"UPDATE posts SET pinned_until_ms = ?, pinned_at = ?, pinned_by = ? WHERE id = ? AND deleted_at IS NULL",
 				[pinnedUntilMs, now, userId, postId],
 			);
 		}
@@ -357,7 +357,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		const postRow = await queryOne<{ isBanned: number }>(
 			db,
-			"SELECT is_banned as isBanned FROM posts WHERE id = ?",
+			"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 		if (!postRow) {
@@ -389,7 +389,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	if (intent === "delete") {
 		const postOwner = await queryOne<{ authorId: number }>(
 			db,
-			"SELECT author_id as authorId FROM posts WHERE id = ?",
+			"SELECT author_id as authorId FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 		if (!postOwner) {
@@ -413,7 +413,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	if (intent === "toggleLike") {
 		const postOwner = await queryOne<{ authorId: number }>(
 			db,
-			"SELECT author_id as authorId FROM posts WHERE id = ?",
+			"SELECT author_id as authorId FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 		if (!postOwner) {
@@ -446,7 +446,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	if (intent === "deletePostAttachments") {
 		const postOwner = await queryOne<{ authorId: number }>(
 			db,
-			"SELECT author_id as authorId FROM posts WHERE id = ?",
+			"SELECT author_id as authorId FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 		if (!postOwner) {
@@ -512,7 +512,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		const comment = await queryOne<{ authorId: number; postId: number }>(
 			db,
-			"SELECT author_id as authorId, post_id as postId FROM comments WHERE id = ?",
+			"SELECT author_id as authorId, post_id as postId FROM comments WHERE id = ? AND deleted_at IS NULL",
 			[commentId],
 		);
 		if (!comment) {
@@ -579,9 +579,12 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const postState = await queryOne<{ isBanned: number }>(
 		db,
-		"SELECT is_banned as isBanned FROM posts WHERE id = ?",
+		"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
 		[postId],
 	);
+	if (!postState) {
+		return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+	}
 	if (postState?.isBanned) {
 		return json<ActionData>({ formError: "该帖子已封禁，禁止跟帖回复" }, { status: 403 });
 	}

@@ -20,12 +20,12 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
 	const postCountRow = await queryOne<{ count: number | string }>(
 		db,
-		"SELECT COUNT(1) as count FROM posts WHERE author_id = ?",
+		"SELECT COUNT(1) as count FROM posts WHERE author_id = ? AND deleted_at IS NULL",
 		[me.id],
 	);
 	const commentCountRow = await queryOne<{ count: number | string }>(
 		db,
-		"SELECT COUNT(1) as count FROM comments WHERE author_id = ?",
+		"SELECT COUNT(1) as count FROM comments WHERE author_id = ? AND deleted_at IS NULL",
 		[me.id],
 	);
 	const likeCountRow = await queryOne<{ count: number | string }>(
@@ -162,6 +162,18 @@ export default function MePage() {
 						>
 							修改密码
 						</a>
+						<Link
+							to="/me/posts"
+							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+						>
+							我的帖子管理
+						</Link>
+						<Link
+							to="/me/comments"
+							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+						>
+							我的评论管理
+						</Link>
 					</div>
 					<dl className="mt-4 grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
 						<div>

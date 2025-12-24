@@ -100,7 +100,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	}
 	const pageSize = FIXED_PAGE_SIZE;
 	const requestedPage = parsePositiveInt(url.searchParams.get("page")) ?? 1;
-	const where: string[] = ["p.area_id = ?"];
+	const where: string[] = ["p.area_id = ?", "p.deleted_at IS NULL"];
 	const whereArgs: Array<string | number> = [areaId];
 	if (q) {
 		where.push("(p.title LIKE ? OR p.content LIKE ?)");

@@ -64,6 +64,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 			       ) as rn
 			FROM posts p
 			JOIN users u ON p.author_id = u.id
+			WHERE p.deleted_at IS NULL
 		 )
 		 WHERE rn <= 5`,
 		[now],

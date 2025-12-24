@@ -32,7 +32,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const db = getDBFromContext(context);
 	const post = await queryOne<{ authorId: number }>(
 		db,
-		"SELECT author_id as authorId FROM posts WHERE id = ?",
+		"SELECT author_id as authorId FROM posts WHERE id = ? AND deleted_at IS NULL",
 		[postId],
 	);
 	if (!post) {
