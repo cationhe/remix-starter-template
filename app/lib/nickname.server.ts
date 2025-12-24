@@ -207,7 +207,6 @@ export async function reviewNicknameChangeRequest(args: {
 }) {
 	const db = getDBFromContext(args.context);
 	try {
-		await execute(db, "BEGIN", []);
 		const row = await queryOne<{
 			id: number;
 			userId: number;
@@ -219,49 +218,47 @@ export async function reviewNicknameChangeRequest(args: {
 			[args.requestId],
 		);
 		if (!row || row.status !== "pending") {
-			await execute(db, "ROLLBACK", []);
 			return { ok: false as const, status: 400, error: "申请不存在或已处理" };
 		}
 		if (args.approved) {
-			const result = await execute(
-				db,
-				"UPDATE nickname_change_requests SET status = 'approved', reviewed_at = ?, reviewed_by = ?, review_note = ? WHERE id = ? AND status = 'pending'",
-				[args.now, args.reviewedBy, args.reviewNote, args.requestId],
-			);
-			const changed = Number((result as any)?.meta?.changes ?? 0);
+			const results = await db.batch([
+				db
+					.prepare(
+						"UPDATE nickname_change_requests SET status = 'approved', reviewed_at = ?, reviewed_by = ?, review_note = ? WHERE id = ? AND status = 'pending' AND EXISTS (SELECT 1 FROM users u WHERE u.id = nickname_change_requests.user_id AND u.deleted_at IS NULL)",
+					)
+					.bind(args.now, args.reviewedBy, args.reviewNote, args.requestId),
+				db
+					.prepare(
+						"UPDATE users SET display_name = (SELECT desired_display_name FROM nickname_change_requests WHERE id = ? AND status = 'approved'), display_name_changed_at = COALESCE(display_name_changed_at, ?) WHERE id = (SELECT user_id FROM nickname_change_requests WHERE id = ? AND status = 'approved') AND deleted_at IS NULL",
+					)
+					.bind(args.requestId, args.now, args.requestId),
+			]);
+			const changed = Number((results[0] as any)?.meta?.changes ?? 0);
 			if (changed !== 1) {
-				await execute(db, "ROLLBACK", []);
-				return { ok: false as const, status: 400, error: "申请不存在或已处理" };
+				return { ok: false as const, status: 400, error: "申请不存在、已处理或用户已删除" };
 			}
-			await execute(
-				db,
-				"UPDATE users SET display_name = ?, display_name_changed_at = COALESCE(display_name_changed_at, ?) WHERE id = ? AND deleted_at IS NULL",
-				[row.desiredDisplayName, args.now, row.userId],
-			);
-			await execute(db, "COMMIT", []);
 			return { ok: true as const, userId: row.userId, desiredDisplayName: row.desiredDisplayName };
 		}
 
-		const result = await execute(
-			db,
-			"UPDATE nickname_change_requests SET status = 'rejected', reviewed_at = ?, reviewed_by = ?, review_note = ? WHERE id = ? AND status = 'pending'",
-			[args.now, args.reviewedBy, args.reviewNote, args.requestId],
-		);
-		const changed = Number((result as any)?.meta?.changes ?? 0);
+		const results = await db.batch([
+			db
+				.prepare(
+					"UPDATE nickname_change_requests SET status = 'rejected', reviewed_at = ?, reviewed_by = ?, review_note = ? WHERE id = ? AND status = 'pending' AND EXISTS (SELECT 1 FROM users u WHERE u.id = nickname_change_requests.user_id AND u.deleted_at IS NULL)",
+				)
+				.bind(args.now, args.reviewedBy, args.reviewNote, args.requestId),
+		]);
+		const changed = Number((results[0] as any)?.meta?.changes ?? 0);
 		if (changed !== 1) {
-			await execute(db, "ROLLBACK", []);
-			return { ok: false as const, status: 400, error: "申请不存在或已处理" };
+			return { ok: false as const, status: 400, error: "申请不存在、已处理或用户已删除" };
 		}
-		await execute(db, "COMMIT", []);
 		return { ok: true as const, userId: row.userId, desiredDisplayName: row.desiredDisplayName };
 	} catch (error) {
-		try {
-			await execute(db, "ROLLBACK", []);
-		} catch {
-		}
 		const message = error instanceof Error ? error.message : "";
 		if (message.includes("no such table") || message.includes("no such column")) {
 			return { ok: false as const, status: 500, error: "数据库未升级：请先应用最新迁移" };
+		}
+		if (message.includes("To execute a transaction")) {
+			return { ok: false as const, status: 500, error: "数据库事务执行失败：请稍后重试" };
 		}
 		throw error;
 	}
