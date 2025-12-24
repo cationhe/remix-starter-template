@@ -1,21 +1,37 @@
-import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
-import { json } from "@remix-run/cloudflare";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
+import { json, redirect } from "@remix-run/cloudflare";
 import {
+	Form,
 	Link,
 	Outlet,
+	useActionData,
 	useFetcher,
 	useLoaderData,
 	useLocation,
 	useNavigate,
+	useNavigation,
 	useSearchParams,
 } from "@remix-run/react";
 import { useEffect, useRef, useState } from "react";
-import { getDailyQuotaStatus, requireUser } from "~/lib/auth.server";
-import { getDBFromContext, queryOne } from "~/lib/d1.server";
+import { assertNotBanned, getClientIp, getDailyQuotaStatus, requireUser } from "~/lib/auth.server";
+import { execute, getDBFromContext, queryOne } from "~/lib/d1.server";
+import {
+	createNicknameChangeRequest,
+	getDisplayNameChangedAt,
+	getPendingNicknameRequestForUser,
+	listSuperadminIds,
+	tryUpdateDisplayNameOnce,
+	validateDisplayName,
+} from "~/lib/nickname.server";
+import { sendMessage } from "~/lib/messages.server";
 
 type LoaderData = {
 	me: Awaited<ReturnType<typeof requireUser>>;
 	quota: Awaited<ReturnType<typeof getDailyQuotaStatus>>;
+	nickname: {
+		displayNameChangedAt: number | null;
+		pendingRequest: Awaited<ReturnType<typeof getPendingNicknameRequestForUser>>;
+	};
 	stats: {
 		postCount: number;
 		commentCount: number;
@@ -23,10 +39,18 @@ type LoaderData = {
 	};
 };
 
+type ActionData = {
+	formError?: string;
+};
+
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	const db = getDBFromContext(context);
 	const quota = await getDailyQuotaStatus({ context, user: me });
+	const [displayNameChangedAt, pendingRequest] = await Promise.all([
+		getDisplayNameChangedAt(context, me.id),
+		getPendingNicknameRequestForUser(context, me.id),
+	]);
 
 	const postCountRow = await queryOne<{ count: number | string }>(
 		db,
@@ -47,6 +71,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	return json<LoaderData>({
 		me,
 		quota,
+		nickname: {
+			displayNameChangedAt,
+			pendingRequest,
+		},
 		stats: {
 			postCount: Number(postCountRow?.count ?? 0),
 			commentCount: Number(commentCountRow?.count ?? 0),
@@ -55,10 +83,110 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	});
 }
 
+export async function action({ request, context }: ActionFunctionArgs) {
+	const me = await requireUser(request, context);
+	assertNotBanned(me);
+	const formData = await request.formData();
+	const intent = String(formData.get("intent") || "").trim();
+	if (intent !== "changeNickname") {
+		return json<ActionData>({ formError: "未知操作" }, { status: 400 });
+	}
+	const desiredRaw = String(formData.get("desiredDisplayName") || "");
+	const validated = validateDisplayName(desiredRaw);
+	if (!validated.ok) {
+		return json<ActionData>({ formError: validated.error }, { status: 400 });
+	}
+	if (validated.value === me.displayName) {
+		return json<ActionData>({ formError: "新昵称不能与当前昵称相同" }, { status: 400 });
+	}
+
+	const now = Date.now();
+	const ip = getClientIp(request);
+	const userAgent = request.headers.get("User-Agent");
+	const changedAt = await getDisplayNameChangedAt(context, me.id);
+	if (!changedAt) {
+		const updated = await tryUpdateDisplayNameOnce({
+			context,
+			userId: me.id,
+			nextDisplayName: validated.value,
+			now,
+		});
+		if (!updated.ok) {
+			return json<ActionData>({ formError: updated.error }, { status: updated.status });
+		}
+		if (updated.changed === 1) {
+			try {
+				await execute(
+					getDBFromContext(context),
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						me.id,
+						"display_name_changed_once",
+						ip,
+						userAgent,
+						JSON.stringify({ from: me.displayName, to: validated.value }),
+						now,
+					],
+				);
+			} catch {
+			}
+			return redirect("/me?nickChanged=1");
+		}
+	}
+
+	const created = await createNicknameChangeRequest({
+		context,
+		userId: me.id,
+		currentDisplayName: me.displayName,
+		desiredDisplayName: validated.value,
+		now,
+	});
+	if (!created.ok) {
+		return json<ActionData>({ formError: created.error }, { status: created.status });
+	}
+
+	try {
+		await execute(
+			getDBFromContext(context),
+			"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			[
+				me.id,
+				"nickname_change_request_submitted",
+				ip,
+				userAgent,
+				JSON.stringify({ from: me.displayName, to: validated.value }),
+				now,
+			],
+		);
+	} catch {
+	}
+
+	const superadminIds = (await listSuperadminIds(context)).filter((id) => id !== me.id);
+	if (superadminIds.length > 0) {
+		const content =
+			"昵称修改申请\n" +
+			`用户ID：${me.id}\n` +
+			`当前昵称：${me.displayName}\n` +
+			`拟修改昵称：${validated.value}\n` +
+			`申请时间：${new Date(now).toLocaleString()}`;
+		for (const recipientId of superadminIds) {
+			try {
+				await sendMessage(context, { sender: me, recipientId, content });
+			} catch {
+			}
+		}
+	}
+
+	return redirect("/me?nickRequested=1");
+}
+
 export default function MePage() {
 	const data = useLoaderData<typeof loader>();
+	const actionData = useActionData<typeof action>();
+	const navigation = useNavigation();
 	const me = data.me;
 	const isBanned = Boolean(me.isBanned);
+	const isSubmitting = navigation.state === "submitting";
 	const quotaFetcher = useFetcher<LoaderData>();
 	const [quotaState, setQuotaState] = useState(() => ({ quota: data.quota, updatedAt: Date.now() }));
 	const quota = quotaState.quota;
@@ -69,8 +197,12 @@ export default function MePage() {
 	const [navError, setNavError] = useState<string | null>(null);
 	const forcedOnceRef = useRef(false);
 	const pwdChanged = searchParams.get("pwdChanged") === "1";
+	const nickChanged = searchParams.get("nickChanged") === "1";
+	const nickRequested = searchParams.get("nickRequested") === "1";
 	const [now, setNow] = useState(() => Date.now());
 	const quotaCacheKey = "me:daily-quota";
+	const pendingNickname = data.nickname.pendingRequest;
+	const hasUsedFreeNicknameChange = Boolean(data.nickname.displayNameChangedAt);
 
 	const resetDiff = Math.max(0, quota.nextResetAt - now);
 	const resetSeconds = Math.floor(resetDiff / 1000);
@@ -251,6 +383,62 @@ export default function MePage() {
 						</Link>
 					</div>
 				</header>
+
+				<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
+					<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">昵称修改</h2>
+					{nickChanged ? (
+						<div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-700 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200">
+							昵称已更新
+						</div>
+					) : null}
+					{nickRequested ? (
+						<div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+							修改申请已提交，等待管理员审批
+						</div>
+					) : null}
+					{actionData?.formError ? (
+						<div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+							{actionData.formError}
+						</div>
+					) : null}
+					{pendingNickname ? (
+						<div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+							<p>你已提交昵称修改申请，正在等待审批。</p>
+							<p className="mt-1">
+								{pendingNickname.currentDisplayName} → {pendingNickname.desiredDisplayName}
+							</p>
+							<p className="mt-1">提交时间：{new Date(pendingNickname.createdAt).toLocaleString()}</p>
+						</div>
+					) : null}
+					<p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+						{hasUsedFreeNicknameChange ? "已使用首次修改权限，后续修改需要管理员审批。" : "你可以免费修改昵称 1 次，修改后立即生效。"}
+					</p>
+					<Form method="post" className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+						<input type="hidden" name="intent" value="changeNickname" />
+						<label className="flex-1">
+							<div className="mb-1 text-xs text-gray-600 dark:text-gray-300">新昵称</div>
+							<input
+								name="desiredDisplayName"
+								required
+								disabled={Boolean(pendingNickname) || isSubmitting}
+								maxLength={20}
+								className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+								placeholder="请输入新昵称"
+							/>
+						</label>
+						<button
+							type="submit"
+							disabled={Boolean(pendingNickname) || isSubmitting}
+							className={
+								Boolean(pendingNickname) || isSubmitting
+									? "rounded bg-gray-300 px-4 py-2 text-sm font-medium text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+									: "rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+							}
+						>
+							{hasUsedFreeNicknameChange ? "提交审批" : "立即修改"}
+						</button>
+					</Form>
+				</section>
 
 				<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 					<div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
