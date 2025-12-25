@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
+import { Form, Link, Outlet, useActionData, useLoaderData, useLocation, useNavigation } from "@remix-run/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
@@ -40,8 +40,11 @@ type PostDetail = {
 	title: string;
 	content: string;
 	createdAt: number;
+	updatedAt: number | null;
+	updatedBy: number | null;
 	authorId: number;
 	authorName: string;
+	updatedByName: string | null;
 	isBanned: number;
 	bannedAt: number | null;
 	bannedBy: number | null;
@@ -49,6 +52,22 @@ type PostDetail = {
 	pinnedUntilMs: number | null;
 	pinnedAt: number | null;
 	pinnedBy: number | null;
+};
+
+type PostDetailRow = Omit<PostDetail, "updatedByName">;
+
+type PostEditItem = {
+	id: number;
+	createdAt: number;
+	editorId: number;
+	editorName: string;
+	changedTitle: boolean;
+	changedContent: boolean;
+	changedArea: boolean;
+	oldTitle: string;
+	newTitle: string;
+	oldAreaId: number;
+	newAreaId: number;
 };
 
 type CommentItem = {
@@ -70,6 +89,7 @@ type LoaderData = {
 		limitBytes: number;
 		paused: boolean;
 	};
+	postEdits: PostEditItem[];
 	comments: CommentItem[];
 	commentCount: number;
 	likeCount: number;
@@ -111,14 +131,39 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		throw new Response("无效的帖子ID", { status: 400 });
 	}
 	const db = getDBFromContext(context);
-	const post = await queryOne<PostDetail>(
-		db,
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
-		[id],
-	);
-	if (!post) {
+	let postRow: PostDetailRow | null = null;
+	try {
+		postRow = await queryOne<PostDetailRow>(
+			db,
+			"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
+			[id],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && message.includes("updated_by")) {
+			postRow = await queryOne<PostDetailRow>(
+				db,
+				"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
+				[id],
+			);
+		} else {
+			throw error;
+		}
+	}
+	if (!postRow) {
 		throw new Response("帖子不存在", { status: 404 });
 	}
+
+	let updatedByName: string | null = null;
+	if (postRow.updatedBy) {
+		const row = await queryOne<{ displayName: string }>(
+			db,
+			"SELECT display_name as displayName FROM users WHERE id = ? AND deleted_at IS NULL",
+			[postRow.updatedBy],
+		);
+		updatedByName = row?.displayName ?? null;
+	}
+	const post: PostDetail = { ...postRow, updatedByName };
 
 	const commentCountRow = await queryOne<{ count: number | string }>(
 		db,
@@ -171,11 +216,52 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const attachments = await listAttachmentsByPostId(context, id);
 	const attachmentStorage = await getAttachmentStorageUsage(context);
 
+	let postEdits: PostEditItem[] = [];
+	try {
+		const editRows = await queryAll<{
+			id: number;
+			createdAt: number;
+			editorId: number;
+			editorName: string;
+			oldTitle: string;
+			newTitle: string;
+			oldContent: string;
+			newContent: string;
+			oldAreaId: number;
+			newAreaId: number;
+		}>(
+			db,
+			"SELECT e.id as id, e.created_at as createdAt, e.editor_id as editorId, u.display_name as editorName, e.old_title as oldTitle, e.new_title as newTitle, e.old_content as oldContent, e.new_content as newContent, e.old_area_id as oldAreaId, e.new_area_id as newAreaId FROM post_edits e JOIN users u ON e.editor_id = u.id WHERE e.post_id = ? ORDER BY e.created_at DESC, e.id DESC LIMIT 20",
+			[id],
+		);
+		postEdits = editRows.map((r) => ({
+			id: r.id,
+			createdAt: r.createdAt,
+			editorId: r.editorId,
+			editorName: r.editorName,
+			changedTitle: r.oldTitle !== r.newTitle,
+			changedContent: r.oldContent !== r.newContent,
+			changedArea: r.oldAreaId !== r.newAreaId,
+			oldTitle: r.oldTitle,
+			newTitle: r.newTitle,
+			oldAreaId: r.oldAreaId,
+			newAreaId: r.newAreaId,
+		}));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such table") || message.includes("no such column")) {
+			postEdits = [];
+		} else {
+			throw error;
+		}
+	}
+
 	return json<LoaderData>({
 		user,
 		post,
 		attachments,
 		attachmentStorage,
+		postEdits,
 		comments: commentsWithAttachments,
 		commentCount,
 		likeCount,
@@ -619,6 +705,11 @@ export default function PostDetailPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
+	const location = useLocation();
+	const isEditRoute = /\/edit\/?$/.test(location.pathname);
+	if (isEditRoute) {
+		return <Outlet />;
+	}
 	const isSubmitting = navigation.state === "submitting";
 	const isBanned = Boolean(data.user?.isBanned);
 	const postBanned = Boolean(data.post.isBanned);
@@ -633,6 +724,9 @@ export default function PostDetailPage() {
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
 	const isAuthor = Boolean(data.user && data.user.id === data.post.authorId);
+	const canEditPost = Boolean(
+		data.user && (data.user.id === data.post.authorId || data.user.role === "superadmin" || data.user.role === "topadmin"),
+	);
 	const canManageAttachments = Boolean(isAuthor && !isBanned);
 	const uploadsPaused = data.attachmentStorage.paused;
 	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
@@ -1419,6 +1513,11 @@ export default function PostDetailPage() {
 							<span className="ml-3">
 								发布时间：{new Date(data.post.createdAt).toLocaleString()}
 							</span>
+							{data.post.updatedAt ? (
+								<span className="ml-3">
+									最后修改：{new Date(data.post.updatedAt).toLocaleString()}
+								</span>
+							) : null}
 							<span className="ml-3">评论：{data.commentCount}</span>
 							<span className="ml-3">点赞：{data.likeCount}</span>
 						</p>
@@ -1450,6 +1549,14 @@ export default function PostDetailPage() {
 								返回列表
 							</Link>
 							<div className="flex items-center gap-2">
+								{canEditPost ? (
+									<Link
+										to={`/posts/${data.post.id}/edit`}
+										className="rounded border border-gray-300 px-3 py-1 text-sm font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									>
+										编辑
+									</Link>
+								) : null}
 								{data.user && data.user.id === data.post.authorId ? (
 									isBanned ? (
 										<button
@@ -1619,6 +1726,37 @@ export default function PostDetailPage() {
 							{data.post.content}
 						</div>
 					</section>
+					{data.postEdits.length > 0 ? (
+						<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
+							<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
+								修改历史（{data.postEdits.length}）
+							</h2>
+							<ul className="space-y-2 text-sm">
+								{data.postEdits.map((e) => {
+									const changes: string[] = [];
+									if (e.changedTitle) changes.push("标题");
+									if (e.changedContent) changes.push("内容");
+									if (e.changedArea) changes.push("讨论区");
+									const changesText = changes.length > 0 ? changes.join("、") : "无";
+									return (
+										<li key={e.id} className="rounded border border-gray-200 px-3 py-2 dark:border-gray-700">
+											<div className="flex flex-wrap items-center justify-between gap-2">
+												<div className="font-medium text-gray-900 dark:text-gray-100">
+													{new Date(e.createdAt).toLocaleString()} · {e.editorName}
+												</div>
+												<div className="text-xs text-gray-500 dark:text-gray-400">修改字段：{changesText}</div>
+											</div>
+											{e.changedTitle ? (
+												<div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+													标题：{e.oldTitle} → {e.newTitle}
+												</div>
+											) : null}
+									</li>
+									);
+								})}
+							</ul>
+						</section>
+					) : null}
 					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">

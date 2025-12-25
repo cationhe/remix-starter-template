@@ -10,7 +10,7 @@ test("topadmin 可修改 superadmin 账户等级并写入审计日志", async ({
 		"X-Forwarded-For": randomFakeIp("10"),
 	});
 
-	const topadminEmail = "7103308@qq.com";
+	const topadminEmail = "e2e_topadmin@example.com";
 	const topadminPassword = "Topadmin123";
 	const userEmail = `u_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
 	const userPassword = "User12345";
