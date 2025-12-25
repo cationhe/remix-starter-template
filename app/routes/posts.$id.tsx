@@ -639,7 +639,7 @@ export default function PostDetailPage() {
 	const uploadsPausedMessage = `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
 	const maxFilesPerPost = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
 	const maxTotalPostBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_POST_BYTES;
-	const maxFileSizeBytesForUser = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_FILE_SIZE_BYTES;
+	const maxFileSizeBytesForUser = attachmentLimits.MAX_FILE_SIZE_BYTES;
 
 	type UploadItem = {
 		id: string;
@@ -715,42 +715,19 @@ export default function PostDetailPage() {
 		if (file.size < attachmentLimits.MIN_FILE_SIZE_BYTES) {
 			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(maxFileSizeBytesForUser)} 之间`;
 		}
-		if (!isSuperadminUser && file.size > attachmentLimits.MAX_FILE_SIZE_BYTES) {
+		if (file.size > attachmentLimits.MAX_FILE_SIZE_BYTES) {
 			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(maxFileSizeBytesForUser)} 之间`;
 		}
 		const name = String(file.name || "");
 		const idx = name.lastIndexOf(".");
 		const ext = idx > 0 ? name.slice(idx + 1).toLowerCase() : "";
-		const allowed = new Set([
-			"pdf",
-			"txt",
-			"md",
-			"csv",
-			"json",
-			"doc",
-			"docx",
-			"xls",
-			"xlsx",
-			"ppt",
-			"pptx",
-			"png",
-			"jpg",
-			"jpeg",
-			"gif",
-			"webp",
-			"mp4",
-			"mov",
-			"webm",
-			"mp3",
-			"wav",
-			"zip",
-			"rar",
-			"7z",
-			"tar",
-			"gz",
-		]);
-		if (!ext || !allowed.has(ext)) {
-			return "不支持的文件类型";
+		if (isSuperadminUser) {
+			if (!ext) return "不支持的文件类型";
+		} else {
+			const allowed = new Set(["ino", "py", "rar", "zip", "docx", "doc", "pdf", "mp4"]);
+			if (!ext || !allowed.has(ext)) {
+				return "不支持的文件类型";
+			}
 		}
 		return null;
 	}

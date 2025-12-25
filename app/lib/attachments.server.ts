@@ -86,32 +86,14 @@ export async function getSiteTotalStorageLimitBytes(context: AppLoadContext) {
 }
 
 const allowedExtensions = new Set([
-	"pdf",
-	"txt",
-	"md",
-	"csv",
-	"json",
-	"doc",
-	"docx",
-	"xls",
-	"xlsx",
-	"ppt",
-	"pptx",
-	"png",
-	"jpg",
-	"jpeg",
-	"gif",
-	"webp",
-	"mp4",
-	"mov",
-	"webm",
-	"mp3",
-	"wav",
-	"zip",
+	"ino",
+	"py",
 	"rar",
-	"7z",
-	"tar",
-	"gz",
+	"zip",
+	"docx",
+	"doc",
+	"pdf",
+	"mp4",
 ]);
 
 function getEnv(context: AppLoadContext): Env {
@@ -142,25 +124,132 @@ function getFileExtension(filename: string) {
 
 export function validateAttachmentMeta(
 	args: { filename: string; mimeType: string; sizeBytes: number },
-	options?: { bypassMaxSize?: boolean },
+	options?: { bypassMaxSize?: boolean; isSuperadmin?: boolean },
 ) {
 	const size = args.sizeBytes;
 	if (!Number.isFinite(size) || size < MIN_FILE_SIZE_BYTES) {
 		return "文件大小需在 1KB 到 100MB 之间";
 	}
-	if (!options?.bypassMaxSize && size > MAX_FILE_SIZE_BYTES) {
+	// 超管不再绕过大小限制，统一按 100MB 上限
+	if (size > MAX_FILE_SIZE_BYTES) {
 		return "文件大小需在 1KB 到 100MB 之间";
 	}
 	const ext = getFileExtension(args.filename);
-	if (!ext || !allowedExtensions.has(ext)) {
+	const isSuperadmin = Boolean(options?.isSuperadmin);
+	if (!ext) {
 		return "不支持的文件类型";
 	}
-	if (ext === "svg" || ext === "html" || ext === "js") {
+	if (!isSuperadmin && !allowedExtensions.has(ext)) {
 		return "不支持的文件类型";
 	}
 	const mime = String(args.mimeType || "").toLowerCase();
 	if (!mime || mime.includes("javascript") || mime.includes("html")) {
 		return "不支持的文件类型";
+	}
+	return null;
+}
+
+const dangerousExtensions = new Set([
+	"svg",
+	"html",
+	"htm",
+	"js",
+	"mjs",
+	"ts",
+	"exe",
+	"bat",
+	"cmd",
+	"sh",
+	"php",
+	"asp",
+	"jsp",
+]);
+
+function hasExtension(name: string) {
+	const idx = name.lastIndexOf(".");
+	return idx > 0 && idx < name.length - 1;
+}
+
+function getNameExt(name: string) {
+	const idx = name.lastIndexOf(".");
+	if (idx <= 0 || idx === name.length - 1) return "";
+	return name.slice(idx + 1).toLowerCase();
+}
+
+function isDangerousName(name: string) {
+	const ext = getNameExt(name);
+	if (!ext) return true;
+	if (dangerousExtensions.has(ext)) return true;
+	return false;
+}
+
+export function assertArchiveContentsSafe(bytes: Uint8Array, ext: string) {
+	const e = String(ext || "").toLowerCase();
+	if (e === "zip") {
+		// Parse end of central directory
+		const sigEOCD = 0x06054b50;
+		let eocdOffset = -1;
+		for (let i = Math.max(0, bytes.length - 65557); i <= bytes.length - 22; i++) {
+			const sig =
+				bytes[i] |
+				(bytes[i + 1] << 8) |
+				(bytes[i + 2] << 16) |
+				(bytes[i + 3] << 24);
+			if (sig === sigEOCD) {
+				eocdOffset = i;
+				break;
+			}
+		}
+		if (eocdOffset < 0) return null;
+		const cdSize =
+			bytes[eocdOffset + 12] |
+			(bytes[eocdOffset + 13] << 8) |
+			(bytes[eocdOffset + 14] << 16) |
+			(bytes[eocdOffset + 15] << 24);
+		const cdOffset =
+			bytes[eocdOffset + 16] |
+			(bytes[eocdOffset + 17] << 8) |
+			(bytes[eocdOffset + 18] << 16) |
+			(bytes[eocdOffset + 19] << 24);
+		if (!Number.isFinite(cdSize) || !Number.isFinite(cdOffset)) return null;
+		const end = Math.min(bytes.length, cdOffset + cdSize);
+		let ptr = cdOffset;
+		const sigCDFH = 0x02014b50;
+		let count = 0;
+		while (ptr + 46 <= end && count < 200) {
+			const sig =
+				bytes[ptr] |
+				(bytes[ptr + 1] << 8) |
+				(bytes[ptr + 2] << 16) |
+				(bytes[ptr + 3] << 24);
+			if (sig !== sigCDFH) break;
+			const nameLen = bytes[ptr + 28] | (bytes[ptr + 29] << 8);
+			const extraLen = bytes[ptr + 30] | (bytes[ptr + 31] << 8);
+			const commentLen = bytes[ptr + 32] | (bytes[ptr + 33] << 8);
+			const nameStart = ptr + 46;
+			const nameEnd = nameStart + nameLen;
+			if (nameEnd > end) break;
+			const nameBytes = bytes.slice(nameStart, nameEnd);
+			const name = new TextDecoder("utf-8", { fatal: false }).decode(nameBytes);
+			if (isDangerousName(name)) {
+				return "压缩包内包含不安全文件类型";
+			}
+			// advance to next entry
+			ptr = nameEnd + extraLen + commentLen;
+			count++;
+		}
+		return null;
+	} else if (e === "rar") {
+		// Heuristic: search dangerous extension markers in bytes
+		const markers = [".svg", ".html", ".htm", ".js", ".mjs", ".ts", ".exe", ".bat", ".cmd", ".sh", ".php", ".asp", ".jsp"];
+		const decoder = new TextDecoder("utf-8", { fatal: false });
+		const text = decoder.decode(bytes.slice(0, Math.min(bytes.length, 2_000_000)));
+		for (const m of markers) {
+			if (text.toLowerCase().includes(m)) {
+				return "压缩包内包含不安全文件类型";
+			}
+		}
+		return null;
 	}
 	return null;
 }

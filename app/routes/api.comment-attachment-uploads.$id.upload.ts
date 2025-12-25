@@ -1,12 +1,13 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { assertNotBanned, requireUser, getClientIp } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
 	containsEicarBytes,
 	finalizeUploadToCommentAttachment,
 	getAttachmentsBucket,
 	getCommentUploadRecord,
+	assertArchiveContentsSafe,
 	validateAttachmentMeta,
 } from "~/lib/attachments.server";
 
@@ -69,7 +70,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const metaError = validateAttachmentMeta(
 		{ filename: file.name, mimeType: file.type, sizeBytes: file.size },
-		{ bypassMaxSize: isSuperadminUser },
+		{ isSuperadmin: isSuperadminUser },
 	);
 	if (metaError) {
 		return json<ActionData>({ ok: false, error: metaError }, { status: 400 });
@@ -84,6 +85,16 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		if (containsEicarBytes(bytes)) {
 			throw new Error("病毒扫描未通过");
 		}
+		{
+			const extIdx = file.name.lastIndexOf(".");
+			const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
+			if (ext === "zip" || ext === "rar") {
+				const unsafe = assertArchiveContentsSafe(bytes, ext);
+				if (unsafe) {
+					return json<ActionData>({ ok: false, error: unsafe }, { status: 400 });
+				}
+			}
+		}
 		await bucket.put(record.r2Key, bytes, {
 			httpMetadata: { contentType: record.mimeType },
 			customMetadata: {
@@ -94,6 +105,34 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			},
 		});
 		await finalizeUploadToCommentAttachment({ context, uploadRecordId });
+		try {
+			const db = getDBFromContext(context);
+			const ip = getClientIp(request);
+			const ua = request.headers.get("User-Agent");
+			const extIdx = file.name.lastIndexOf(".");
+			const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"comment_attachment_uploaded",
+					ip,
+					ua,
+					JSON.stringify({
+						postId: record.postId,
+						commentId: record.commentId,
+						r2Key: record.r2Key,
+						filename: record.filename,
+						ext,
+						mimeType: record.mimeType,
+						sizeBytes: record.sizeBytes,
+					}),
+					Date.now(),
+				],
+			);
+		} catch {
+		}
 		return json<ActionData>({ ok: true });
 	} catch (error) {
 		const traceId = request.headers.get("cf-ray") || "";
@@ -119,6 +158,35 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		const message = error instanceof Error ? error.message : "";
 		if (message.includes("病毒扫描")) {
 			return json<ActionData>({ ok: false, error: traceId ? `病毒扫描未通过（追踪ID：${traceId}）` : "病毒扫描未通过" }, { status: 400 });
+		}
+		try {
+			const db = getDBFromContext(context);
+			const ip = getClientIp(request);
+			const ua = request.headers.get("User-Agent");
+			const extIdx = file.name.lastIndexOf(".");
+			const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"comment_attachment_upload_rejected",
+					ip,
+					ua,
+					JSON.stringify({
+						postId: record.postId,
+						commentId: record.commentId,
+						r2Key: record.r2Key,
+						filename: record.filename,
+						ext,
+						mimeType: record.mimeType,
+						sizeBytes: record.sizeBytes,
+						message,
+					}),
+					Date.now(),
+				],
+			);
+		} catch {
 		}
 		if (error instanceof Response) {
 			const text = await error.text();

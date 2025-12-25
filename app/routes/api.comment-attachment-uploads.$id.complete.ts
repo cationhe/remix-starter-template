@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { assertNotBanned, requireUser, getClientIp } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
 	attachmentLimits,
@@ -8,6 +8,8 @@ import {
 	getAttachmentsBucket,
 	getCommentUploadRecord,
 	listUploadedCommentParts,
+	containsEicarBytes,
+	assertArchiveContentsSafe,
 } from "~/lib/attachments.server";
 
 type ActionData =
@@ -73,6 +75,64 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		const bucket = getAttachmentsBucket(context);
 		const upload = bucket.resumeMultipartUpload(record.r2Key, record.uploadId);
 		await upload.complete(parts.map((p) => ({ partNumber: p.partNumber, etag: p.etag })));
+		// 拉取对象并进行安全检查
+		try {
+			const obj = await bucket.get(record.r2Key);
+			if (!obj) throw new Error("对象不存在");
+			const bytes = new Uint8Array(await obj.arrayBuffer());
+			if (containsEicarBytes(bytes)) {
+				throw new Response("病毒扫描未通过", { status: 400 });
+			}
+			const extIdx = record.filename.lastIndexOf(".");
+			const ext = extIdx > 0 && extIdx < record.filename.length - 1 ? record.filename.slice(extIdx + 1).toLowerCase() : "";
+			if (ext === "zip" || ext === "rar") {
+				const unsafe = assertArchiveContentsSafe(bytes, ext);
+				if (unsafe) {
+					throw new Response(unsafe, { status: 400 });
+				}
+			}
+		} catch (scanError) {
+			try {
+				await bucket.delete(record.r2Key);
+			} catch {
+			}
+			try {
+				const db = getDBFromContext(context);
+				await execute(db, "DELETE FROM comment_attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
+				await execute(db, "DELETE FROM comment_attachment_uploads WHERE id = ?", [record.id]);
+				await execute(db, "DELETE FROM comment_attachments WHERE r2_key = ?", [record.r2Key]);
+				const ip = getClientIp(request);
+				const ua = request.headers.get("User-Agent");
+				const extIdx = record.filename.lastIndexOf(".");
+				const ext = extIdx > 0 && extIdx < record.filename.length - 1 ? record.filename.slice(extIdx + 1).toLowerCase() : "";
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						user.id,
+						"comment_attachment_upload_rejected",
+						ip,
+						ua,
+						JSON.stringify({
+							postId: record.postId,
+							commentId: record.commentId,
+							r2Key: record.r2Key,
+							filename: record.filename,
+							ext,
+							mimeType: record.mimeType,
+							sizeBytes: record.sizeBytes,
+							message: scanError instanceof Response ? "安全检查未通过" : (scanError instanceof Error ? scanError.message : ""),
+						}),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			if (scanError instanceof Response) {
+				throw scanError;
+			}
+			throw new Response("安全检查未通过", { status: 400 });
+		}
 		try {
 			await finalizeUploadToCommentAttachment({ context, uploadRecordId });
 		} catch (finalizeError) {
@@ -88,6 +148,34 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			} catch {
 			}
 			throw finalizeError;
+		}
+		try {
+			const db = getDBFromContext(context);
+			const ip = getClientIp(request);
+			const ua = request.headers.get("User-Agent");
+			const extIdx = record.filename.lastIndexOf(".");
+			const ext = extIdx > 0 && extIdx < record.filename.length - 1 ? record.filename.slice(extIdx + 1).toLowerCase() : "";
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"comment_attachment_uploaded",
+					ip,
+					ua,
+					JSON.stringify({
+						postId: record.postId,
+						commentId: record.commentId,
+						r2Key: record.r2Key,
+						filename: record.filename,
+						ext,
+						mimeType: record.mimeType,
+						sizeBytes: record.sizeBytes,
+					}),
+					Date.now(),
+				],
+			);
+		} catch {
 		}
 		return json<ActionData>({ ok: true });
 	} catch (error) {

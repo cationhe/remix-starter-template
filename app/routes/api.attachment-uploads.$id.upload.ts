@@ -1,11 +1,13 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { assertNotBanned, requireUser, getClientIp } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
+	containsEicarBytes,
 	finalizeUploadToAttachment,
 	getAttachmentsBucket,
 	getUploadRecord,
+	assertArchiveContentsSafe,
 	validateAttachmentMeta,
 } from "~/lib/attachments.server";
 
@@ -63,7 +65,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const metaError = validateAttachmentMeta(
 		{ filename: file.name, mimeType: file.type, sizeBytes: file.size },
-		{ bypassMaxSize: isSuperadminUser },
+		{ isSuperadmin: isSuperadminUser },
 	);
 	if (metaError) {
 		return json<ActionData>({ ok: false, error: metaError }, { status: 400 });
@@ -74,7 +76,19 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	try {
 		const bucket = getAttachmentsBucket(context);
-		await bucket.put(record.r2Key, file.stream(), {
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		if (containsEicarBytes(bytes)) {
+			throw new Error("病毒扫描未通过");
+		}
+		const extIdx = file.name.lastIndexOf(".");
+		const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
+		if (ext === "zip" || ext === "rar") {
+			const unsafe = assertArchiveContentsSafe(bytes, ext);
+			if (unsafe) {
+				return json<ActionData>({ ok: false, error: unsafe }, { status: 400 });
+			}
+		}
+		await bucket.put(record.r2Key, bytes, {
 			httpMetadata: { contentType: record.mimeType },
 			customMetadata: {
 				postId: String(record.postId),
@@ -83,6 +97,31 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			},
 		});
 		await finalizeUploadToAttachment({ context, uploadRecordId });
+		try {
+			const db = getDBFromContext(context);
+			const ip = getClientIp(request);
+			const ua = request.headers.get("User-Agent");
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"attachment_uploaded",
+					ip,
+					ua,
+					JSON.stringify({
+						postId: record.postId,
+						r2Key: record.r2Key,
+						filename: record.filename,
+						ext,
+						mimeType: record.mimeType,
+						sizeBytes: record.sizeBytes,
+					}),
+					Date.now(),
+				],
+			);
+		} catch {
+		}
 		return json<ActionData>({ ok: true });
 	} catch (error) {
 		try {
@@ -95,6 +134,34 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await execute(db, "DELETE FROM attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
 			await execute(db, "DELETE FROM attachment_uploads WHERE id = ?", [record.id]);
 			await execute(db, "DELETE FROM attachments WHERE r2_key = ?", [record.r2Key]);
+		} catch {
+		}
+		try {
+			const db = getDBFromContext(context);
+			const ip = getClientIp(request);
+			const ua = request.headers.get("User-Agent");
+			const extIdx = file.name.lastIndexOf(".");
+			const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"attachment_upload_rejected",
+					ip,
+					ua,
+					JSON.stringify({
+						postId: record.postId,
+						r2Key: record.r2Key,
+						filename: record.filename,
+						ext,
+						mimeType: record.mimeType,
+						sizeBytes: record.sizeBytes,
+						message: error instanceof Error ? error.message : "",
+					}),
+					Date.now(),
+				],
+			);
 		} catch {
 		}
 		if (error instanceof Response) {
