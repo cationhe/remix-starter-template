@@ -25,7 +25,7 @@ import { formatTotalStorageLimit } from "~/lib/attachment-storage";
 import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachments.server";
 
 const attachmentLimits = {
-	MIN_FILE_SIZE_BYTES: 1024,
+	MIN_FILE_SIZE_BYTES: 10,
 	MAX_FILE_SIZE_BYTES: 100 * 1024 * 1024,
 	MAX_ATTACHMENTS_PER_POST: 3,
 	MAX_TOTAL_POST_BYTES: 500 * 1024 * 1024,
@@ -713,7 +713,7 @@ export default function PostDetailPage() {
 
 	function validateLocal(file: File) {
 		if (file.size < attachmentLimits.MIN_FILE_SIZE_BYTES) {
-			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(maxFileSizeBytesForUser)} 之间`;
+			return "上传文件大小不能小于10字节";
 		}
 		if (file.size > attachmentLimits.MAX_FILE_SIZE_BYTES) {
 			return `文件大小需在 ${formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)} 到 ${formatSize(maxFileSizeBytesForUser)} 之间`;
@@ -1772,18 +1772,26 @@ export default function PostDetailPage() {
 									{uploadsPausedMessage}
 								</div>
 							) : null}
-							<input
-								ref={fileInputRef}
-								type="file"
-								multiple
-								disabled={busy || remainingSlots <= 0 || uploadsPaused}
-								onChange={(e) => {
-									const files = Array.from(e.target.files || []);
-									setSelectedFiles(files);
-									e.currentTarget.value = "";
-								}}
-								className="hidden"
-							/>
+			<input
+				ref={fileInputRef}
+				type="file"
+				multiple
+				disabled={busy || remainingSlots <= 0 || uploadsPaused}
+				onChange={(e) => {
+					const files = Array.from(e.target.files || []);
+					const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
+					if (hasTooSmall) {
+						setGlobalError("上传文件大小不能小于10字节");
+						setSelectedFiles([]);
+						e.currentTarget.value = "";
+						return;
+					}
+					setGlobalError(null);
+					setSelectedFiles(files);
+					e.currentTarget.value = "";
+				}}
+				className="hidden"
+			/>
 							<div
 								onDragEnter={(e) => {
 									e.preventDefault();
@@ -1799,16 +1807,23 @@ export default function PostDetailPage() {
 									e.preventDefault();
 								setIsDragging(false);
 							}}
-								onDrop={(e) => {
-									e.preventDefault();
-								setIsDragging(false);
-								if (busy || remainingSlots <= 0 || uploadsPaused) return;
-								const files = Array.from(e.dataTransfer.files || []);
-								setSelectedFiles(files);
-							}}
-							className={
-								busy || remainingSlots <= 0 || uploadsPaused
-									? "rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-500"
+				onDrop={(e) => {
+					e.preventDefault();
+				setIsDragging(false);
+				if (busy || remainingSlots <= 0 || uploadsPaused) return;
+				const files = Array.from(e.dataTransfer.files || []);
+				const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
+				if (hasTooSmall) {
+					setGlobalError("上传文件大小不能小于10字节");
+					setSelectedFiles([]);
+					return;
+				}
+				setGlobalError(null);
+				setSelectedFiles(files);
+			}}
+			className={
+				busy || remainingSlots <= 0 || uploadsPaused
+					? "rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-500"
 									: isDragging
 										? "cursor-pointer rounded-lg border border-dashed border-blue-400 bg-blue-50 p-4 text-sm text-blue-700 dark:border-blue-600 dark:bg-blue-900/20 dark:text-blue-200"
 										: "cursor-pointer rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 hover:border-blue-400 hover:bg-blue-50 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-200 dark:hover:border-blue-600 dark:hover:bg-blue-900/20"
@@ -2069,17 +2084,23 @@ export default function PostDetailPage() {
 													</button>
 												</div>
 													<div className="mt-2 flex items-center justify-between gap-3">
-														<input
-															type="file"
-															multiple
-															disabled={Boolean(commentUploads[comment.id]?.busy)}
-															onChange={(e) => {
-																const files = Array.from(e.target.files || []);
-																updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
-																e.currentTarget.value = "";
-														}}
-															className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
-														/>
+								<input
+									type="file"
+									multiple
+									disabled={Boolean(commentUploads[comment.id]?.busy)}
+									onChange={(e) => {
+										const files = Array.from(e.target.files || []);
+										const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
+										if (hasTooSmall) {
+											updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: [], error: "上传文件大小不能小于10字节" }));
+											e.currentTarget.value = "";
+											return;
+										}
+										updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
+										e.currentTarget.value = "";
+									}}
+									className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
+								/>
 													</div>
 													{(() => {
 														const state = commentUploads[comment.id] || { selectedFiles: [], queue: [], busy: false, error: null };

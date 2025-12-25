@@ -56,7 +56,7 @@ export type CommentAttachmentUploadRecord = {
 	expiresAt: number;
 };
 
-const MIN_FILE_SIZE_BYTES = 1024;
+const MIN_FILE_SIZE_BYTES = 10;
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_POST = 3;
 const MAX_TOTAL_POST_BYTES = 500 * 1024 * 1024;
@@ -147,11 +147,14 @@ export function validateAttachmentMeta(
 	options?: { bypassMaxSize?: boolean; allowAnyExtension?: boolean },
 ) {
 	const size = args.sizeBytes;
-	if (!Number.isFinite(size) || size < MIN_FILE_SIZE_BYTES) {
-		return "文件大小需在 1KB 到 100MB 之间";
+	if (!Number.isFinite(size) || size < 0) {
+		return "文件大小无效";
+	}
+	if (size < MIN_FILE_SIZE_BYTES) {
+		return "上传文件大小不能小于10字节";
 	}
 	if (!options?.bypassMaxSize && size > MAX_FILE_SIZE_BYTES) {
-		return "文件大小需在 1KB 到 100MB 之间";
+		return "文件大小需在 10B 到 100MB 之间";
 	}
 	const ext = getFileExtension(args.filename);
 	if (!ext) {
