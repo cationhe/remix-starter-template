@@ -3,13 +3,13 @@ import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
+	containsEicarBytes,
 	finalizeUploadToCommentAttachment,
 	getAttachmentsBucket,
 	getCommentUploadRecord,
 	inspectRarArchiveFile,
 	inspectZipArchiveFile,
 	validateAttachmentMeta,
-	wrapStreamWithEicarScan,
 } from "~/lib/attachments.server";
 
 type ActionData =
@@ -100,7 +100,11 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 				throw new Response(err, { status: 400 });
 			}
 		}
-		await bucket.put(record.r2Key, wrapStreamWithEicarScan(file.stream()), {
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		if (containsEicarBytes(bytes)) {
+			throw new Response("病毒扫描未通过", { status: 400 });
+		}
+		await bucket.put(record.r2Key, bytes, {
 			httpMetadata: { contentType: record.mimeType },
 			customMetadata: {
 				postId: String(record.postId),
