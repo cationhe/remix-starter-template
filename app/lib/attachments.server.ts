@@ -85,7 +85,7 @@ export async function getSiteTotalStorageLimitBytes(context: AppLoadContext) {
 	}
 }
 
-const allowedExtensions = new Set([
+const normalUserAllowedExtensions = new Set([
 	"ino",
 	"py",
 	"rar",
@@ -95,6 +95,26 @@ const allowedExtensions = new Set([
 	"pdf",
 	"mp4",
 ]);
+
+const archiveExtensions = new Set(["zip", "rar"]);
+
+const forbiddenArchiveInnerExtensions = new Set([
+	"exe",
+	"dll",
+	"com",
+	"msi",
+	"bat",
+	"cmd",
+	"ps1",
+	"sh",
+	"jar",
+	"js",
+	"html",
+	"htm",
+	"svg",
+]);
+
+const forbiddenNestedArchiveExtensions = new Set(["zip", "rar", "7z", "tar", "gz"]);
 
 function getEnv(context: AppLoadContext): Env {
 	return (context as any).cloudflare.env as Env;
@@ -124,132 +144,230 @@ function getFileExtension(filename: string) {
 
 export function validateAttachmentMeta(
 	args: { filename: string; mimeType: string; sizeBytes: number },
-	options?: { bypassMaxSize?: boolean; isSuperadmin?: boolean },
+	options?: { bypassMaxSize?: boolean; allowAnyExtension?: boolean },
 ) {
 	const size = args.sizeBytes;
 	if (!Number.isFinite(size) || size < MIN_FILE_SIZE_BYTES) {
 		return "文件大小需在 1KB 到 100MB 之间";
 	}
-	// 超管不再绕过大小限制，统一按 100MB 上限
-	if (size > MAX_FILE_SIZE_BYTES) {
+	if (!options?.bypassMaxSize && size > MAX_FILE_SIZE_BYTES) {
 		return "文件大小需在 1KB 到 100MB 之间";
 	}
 	const ext = getFileExtension(args.filename);
-	const isSuperadmin = Boolean(options?.isSuperadmin);
 	if (!ext) {
-		return "不支持的文件类型";
+		return "文件必须包含扩展名";
 	}
-	if (!isSuperadmin && !allowedExtensions.has(ext)) {
-		return "不支持的文件类型";
-	}
-	const mime = String(args.mimeType || "").toLowerCase();
-	if (!mime || mime.includes("javascript") || mime.includes("html")) {
+	if (!options?.allowAnyExtension && !normalUserAllowedExtensions.has(ext)) {
 		return "不支持的文件类型";
 	}
 	return null;
 }
 
-const dangerousExtensions = new Set([
-	"svg",
-	"html",
-	"htm",
-	"js",
-	"mjs",
-	"ts",
-	"exe",
-	"bat",
-	"cmd",
-	"sh",
-	"php",
-	"asp",
-	"jsp",
-]);
-
-function hasExtension(name: string) {
-	const idx = name.lastIndexOf(".");
-	return idx > 0 && idx < name.length - 1;
+function readUint16LE(bytes: Uint8Array, offset: number) {
+	return bytes[offset] | (bytes[offset + 1] << 8);
 }
 
-function getNameExt(name: string) {
-	const idx = name.lastIndexOf(".");
-	if (idx <= 0 || idx === name.length - 1) return "";
-	return name.slice(idx + 1).toLowerCase();
+function readUint32LE(bytes: Uint8Array, offset: number) {
+	return (
+		bytes[offset] |
+		(bytes[offset + 1] << 8) |
+		(bytes[offset + 2] << 16) |
+		(bytes[offset + 3] << 24)
+	) >>> 0;
 }
 
-function isDangerousName(name: string) {
-	const ext = getNameExt(name);
-	if (!ext) return true;
-	if (dangerousExtensions.has(ext)) return true;
-	return false;
+export function inspectZipCentralDirectoryBytes(args: {
+	centralDirBytes: Uint8Array;
+	maxEntries: number;
+	maxTotalUncompressedBytes: number;
+	maxCompressionRatio: number;
+}) {
+	const bytes = args.centralDirBytes;
+	let offset = 0;
+	let entries = 0;
+	let totalUncompressed = 0;
+
+	while (offset + 46 <= bytes.length) {
+		const sig = readUint32LE(bytes, offset);
+		if (sig !== 0x02014b50) {
+			break;
+		}
+		const compressedSize = readUint32LE(bytes, offset + 20);
+		const uncompressedSize = readUint32LE(bytes, offset + 24);
+		const nameLen = readUint16LE(bytes, offset + 28);
+		const extraLen = readUint16LE(bytes, offset + 30);
+		const commentLen = readUint16LE(bytes, offset + 32);
+		const nameStart = offset + 46;
+		const nameEnd = nameStart + nameLen;
+		if (nameEnd > bytes.length) {
+			return "压缩包格式无效";
+		}
+		const name = new TextDecoder().decode(bytes.slice(nameStart, nameEnd));
+		const normalized = String(name || "").replace(/\\/g, "/");
+		const trimmed = normalized.replace(/^\/+/, "");
+		if (!trimmed) {
+			return "压缩包内容检查未通过";
+		}
+		if (trimmed.includes("\u0000")) {
+			return "压缩包内容检查未通过";
+		}
+		const parts = trimmed.split("/").filter(Boolean);
+		if (parts.some((p) => p === "." || p === "..")) {
+			return "压缩包内容检查未通过";
+		}
+		const isDir = trimmed.endsWith("/");
+		if (!isDir) {
+			const idx = trimmed.lastIndexOf(".");
+			const innerExt = idx > 0 && idx < trimmed.length - 1 ? trimmed.slice(idx + 1).toLowerCase() : "";
+			if (innerExt && forbiddenArchiveInnerExtensions.has(innerExt)) {
+				return "压缩包内容检查未通过：包含不允许的文件类型";
+			}
+			if (innerExt && forbiddenNestedArchiveExtensions.has(innerExt)) {
+				return "压缩包内容检查未通过：不允许嵌套压缩包";
+			}
+		}
+
+		entries++;
+		if (entries > args.maxEntries) {
+			return "压缩包内容检查未通过：文件数量过多";
+		}
+		if (Number.isFinite(uncompressedSize)) {
+			totalUncompressed += uncompressedSize;
+			if (totalUncompressed > args.maxTotalUncompressedBytes) {
+				return "压缩包内容检查未通过：解压后体积过大";
+			}
+		}
+		const recordLen = 46 + nameLen + extraLen + commentLen;
+		offset += recordLen;
+		if (compressedSize === 0 && uncompressedSize === 0 && recordLen <= 0) {
+			return "压缩包格式无效";
+		}
+	}
+
+	if (entries === 0) {
+		return "压缩包格式无效";
+	}
+	return null;
 }
 
-export function assertArchiveContentsSafe(bytes: Uint8Array, ext: string) {
-	const e = String(ext || "").toLowerCase();
-	if (e === "zip") {
-		// Parse end of central directory
-		const sigEOCD = 0x06054b50;
-		let eocdOffset = -1;
-		for (let i = Math.max(0, bytes.length - 65557); i <= bytes.length - 22; i++) {
-			const sig =
-				bytes[i] |
-				(bytes[i + 1] << 8) |
-				(bytes[i + 2] << 16) |
-				(bytes[i + 3] << 24);
-			if (sig === sigEOCD) {
-				eocdOffset = i;
-				break;
-			}
+export async function inspectZipArchiveFile(file: File) {
+	const sizeBytes = file.size;
+	const tailSize = Math.min(sizeBytes, 66_000 + 22);
+	const tail = new Uint8Array(await file.slice(sizeBytes - tailSize, sizeBytes).arrayBuffer());
+	let eocdIndex = -1;
+	for (let i = tail.length - 22; i >= 0; i--) {
+		if (tail[i] === 0x50 && tail[i + 1] === 0x4b && tail[i + 2] === 0x05 && tail[i + 3] === 0x06) {
+			eocdIndex = i;
+			break;
 		}
-		if (eocdOffset < 0) return null;
-		const cdSize =
-			bytes[eocdOffset + 12] |
-			(bytes[eocdOffset + 13] << 8) |
-			(bytes[eocdOffset + 14] << 16) |
-			(bytes[eocdOffset + 15] << 24);
-		const cdOffset =
-			bytes[eocdOffset + 16] |
-			(bytes[eocdOffset + 17] << 8) |
-			(bytes[eocdOffset + 18] << 16) |
-			(bytes[eocdOffset + 19] << 24);
-		if (!Number.isFinite(cdSize) || !Number.isFinite(cdOffset)) return null;
-		const end = Math.min(bytes.length, cdOffset + cdSize);
-		let ptr = cdOffset;
-		const sigCDFH = 0x02014b50;
-		let count = 0;
-		while (ptr + 46 <= end && count < 200) {
-			const sig =
-				bytes[ptr] |
-				(bytes[ptr + 1] << 8) |
-				(bytes[ptr + 2] << 16) |
-				(bytes[ptr + 3] << 24);
-			if (sig !== sigCDFH) break;
-			const nameLen = bytes[ptr + 28] | (bytes[ptr + 29] << 8);
-			const extraLen = bytes[ptr + 30] | (bytes[ptr + 31] << 8);
-			const commentLen = bytes[ptr + 32] | (bytes[ptr + 33] << 8);
-			const nameStart = ptr + 46;
-			const nameEnd = nameStart + nameLen;
-			if (nameEnd > end) break;
-			const nameBytes = bytes.slice(nameStart, nameEnd);
-			const name = new TextDecoder("utf-8", { fatal: false }).decode(nameBytes);
-			if (isDangerousName(name)) {
-				return "压缩包内包含不安全文件类型";
-			}
-			// advance to next entry
-			ptr = nameEnd + extraLen + commentLen;
-			count++;
+	}
+	if (eocdIndex < 0) {
+		return "压缩包格式无效";
+	}
+	const cdSize = readUint32LE(tail, eocdIndex + 12);
+	const cdOffset = readUint32LE(tail, eocdIndex + 16);
+	if (!cdSize || cdSize > 4 * 1024 * 1024) {
+		return "压缩包内容检查未通过：目录过大";
+	}
+	if (cdOffset + cdSize > sizeBytes) {
+		return "压缩包格式无效";
+	}
+	const centralDirBytes = new Uint8Array(await file.slice(cdOffset, cdOffset + cdSize).arrayBuffer());
+	const err = inspectZipCentralDirectoryBytes({
+		centralDirBytes,
+		maxEntries: 500,
+		maxTotalUncompressedBytes: 2 * 1024 * 1024 * 1024,
+		maxCompressionRatio: 80,
+	});
+	if (err) return err;
+	const ratio = sizeBytes > 0 ? (2 * 1024 * 1024 * 1024) / sizeBytes : 0;
+	if (ratio > 0 && ratio > 10_000) {
+		return "压缩包内容检查未通过";
+	}
+	return null;
+}
+
+export function inspectZipArchiveBytes(bytes: Uint8Array) {
+	const sizeBytes = bytes.length;
+	const tailSize = Math.min(sizeBytes, 66_000 + 22);
+	const tail = bytes.slice(sizeBytes - tailSize, sizeBytes);
+	let eocdIndex = -1;
+	for (let i = tail.length - 22; i >= 0; i--) {
+		if (tail[i] === 0x50 && tail[i + 1] === 0x4b && tail[i + 2] === 0x05 && tail[i + 3] === 0x06) {
+			eocdIndex = i;
+			break;
 		}
-		return null;
-	} else if (e === "rar") {
-		// Heuristic: search dangerous extension markers in bytes
-		const markers = [".svg", ".html", ".htm", ".js", ".mjs", ".ts", ".exe", ".bat", ".cmd", ".sh", ".php", ".asp", ".jsp"];
-		const decoder = new TextDecoder("utf-8", { fatal: false });
-		const text = decoder.decode(bytes.slice(0, Math.min(bytes.length, 2_000_000)));
-		for (const m of markers) {
-			if (text.toLowerCase().includes(m)) {
-				return "压缩包内包含不安全文件类型";
-			}
-		}
-		return null;
+	}
+	if (eocdIndex < 0) {
+		return "压缩包格式无效";
+	}
+	const cdSize = readUint32LE(tail, eocdIndex + 12);
+	const cdOffset = readUint32LE(tail, eocdIndex + 16);
+	if (!cdSize || cdSize > 4 * 1024 * 1024) {
+		return "压缩包内容检查未通过：目录过大";
+	}
+	if (cdOffset + cdSize > sizeBytes) {
+		return "压缩包格式无效";
+	}
+	const centralDirBytes = bytes.slice(cdOffset, cdOffset + cdSize);
+	return inspectZipCentralDirectoryBytes({
+		centralDirBytes,
+		maxEntries: 500,
+		maxTotalUncompressedBytes: 2 * 1024 * 1024 * 1024,
+		maxCompressionRatio: 80,
+	});
+}
+
+export async function inspectRarArchiveFile(file: File) {
+	const head = new Uint8Array(await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer());
+	const sig = new TextDecoder().decode(head.slice(0, 8));
+	const isRar4 = sig === "Rar!\u001a\u0007\u0000";
+	const isRar5 = sig === "Rar!\u001a\u0007\u0001\u0000";
+	if (!isRar4 && !isRar5) {
+		return "压缩包格式无效";
+	}
+	const text = new TextDecoder().decode(head).toLowerCase();
+	if (
+		text.includes(".exe") ||
+		text.includes(".dll") ||
+		text.includes(".bat") ||
+		text.includes(".cmd") ||
+		text.includes(".ps1") ||
+		text.includes(".sh") ||
+		text.includes(".zip") ||
+		text.includes(".rar") ||
+		text.includes(".7z") ||
+		text.includes(".tar") ||
+		text.includes(".gz")
+	) {
+		return "压缩包内容检查未通过";
+	}
+	return null;
+}
+
+export function inspectRarArchiveBytes(bytes: Uint8Array) {
+	const head = bytes.slice(0, Math.min(bytes.length, 1024 * 1024));
+	const sig = new TextDecoder().decode(head.slice(0, 8));
+	const isRar4 = sig === "Rar!\u001a\u0007\u0000";
+	const isRar5 = sig === "Rar!\u001a\u0007\u0001\u0000";
+	if (!isRar4 && !isRar5) {
+		return "压缩包格式无效";
+	}
+	const text = new TextDecoder().decode(head).toLowerCase();
+	if (
+		text.includes(".exe") ||
+		text.includes(".dll") ||
+		text.includes(".bat") ||
+		text.includes(".cmd") ||
+		text.includes(".ps1") ||
+		text.includes(".sh") ||
+		text.includes(".zip") ||
+		text.includes(".rar") ||
+		text.includes(".7z") ||
+		text.includes(".tar") ||
+		text.includes(".gz")
+	) {
+		return "压缩包内容检查未通过";
 	}
 	return null;
 }
@@ -435,15 +553,13 @@ export async function createCommentUploadRecord(args: {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
-	isSuperadmin?: boolean;
 }) {
 	const now = Date.now();
 	await cleanupExpiredCommentUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
-	const isSuperadmin = Boolean(args.isSuperadmin);
 	const existing = await countCommentAttachmentsForComment(args.context, args.commentId);
 	let active = await countActiveCommentUploadsForComment(args.context, args.commentId, now);
-	if (!isSuperadmin && existing + active >= MAX_ATTACHMENTS_PER_COMMENT) {
+	if (existing + active >= MAX_ATTACHMENTS_PER_COMMENT) {
 		if (existing < MAX_ATTACHMENTS_PER_COMMENT && active > 0) {
 			const db = getDBFromContext(args.context);
 			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
@@ -496,17 +612,16 @@ export async function createCommentUploadRecord(args: {
 	);
 	const usedBytes = Number(usedRow?.sum ?? 0);
 	const reservedBytes = Number(reservedRow?.sum ?? 0);
-	if (!isSuperadmin && usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_COMMENT_BYTES) {
+	if (usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_COMMENT_BYTES) {
 		throw new Response("单条评论附件总大小最多 500MB", { status: 400 });
 	}
 	const safeName = sanitizeFilename(args.filename);
 	const key = `posts/${args.postId}/comments/${args.commentId}/${crypto.randomUUID()}_${safeName}`;
 	const bucket = getAttachmentsBucket(args.context);
 	const expiresAt = now + UPLOAD_EXPIRES_MS;
+	const mode = getUploadMode({ sizeBytes: args.sizeBytes, filename: safeName });
 	let uploadId = "single";
-	let mode: "single" | "multipart" = "single";
-	if (args.sizeBytes >= MULTIPART_THRESHOLD_BYTES) {
-		mode = "multipart";
+	if (mode === "multipart") {
 		const upload = await bucket.createMultipartUpload(key, {
 			httpMetadata: { contentType: args.mimeType },
 			customMetadata: {
@@ -662,15 +777,13 @@ export async function createUploadRecord(args: {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
-	isSuperadmin?: boolean;
 }) {
 	const now = Date.now();
 	await cleanupExpiredUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
-	const isSuperadmin = Boolean(args.isSuperadmin);
 	const existing = await countAttachmentsForPost(args.context, args.postId);
 	let active = await countActiveUploadsForPost(args.context, args.postId, now);
-	if (!isSuperadmin && existing + active >= MAX_ATTACHMENTS_PER_POST) {
+	if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
 		if (existing < MAX_ATTACHMENTS_PER_POST && active > 0) {
 			const db = getDBFromContext(args.context);
 			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
@@ -723,17 +836,16 @@ export async function createUploadRecord(args: {
 	);
 	const usedBytes = Number(usedRow?.sum ?? 0);
 	const reservedBytes = Number(reservedRow?.sum ?? 0);
-	if (!isSuperadmin && usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_POST_BYTES) {
+	if (usedBytes + reservedBytes + args.sizeBytes > MAX_TOTAL_POST_BYTES) {
 		throw new Response("单帖附件总大小最多 500MB", { status: 400 });
 	}
 	const safeName = sanitizeFilename(args.filename);
 	const key = `posts/${args.postId}/${crypto.randomUUID()}_${safeName}`;
 	const bucket = getAttachmentsBucket(args.context);
 	const expiresAt = now + UPLOAD_EXPIRES_MS;
+	const mode = getUploadMode({ sizeBytes: args.sizeBytes, filename: safeName });
 	let uploadId = "single";
-	let mode: "single" | "multipart" = "single";
-	if (args.sizeBytes >= MULTIPART_THRESHOLD_BYTES) {
-		mode = "multipart";
+	if (mode === "multipart") {
 		const upload = await bucket.createMultipartUpload(key, {
 			httpMetadata: { contentType: args.mimeType },
 			customMetadata: {
@@ -1168,8 +1280,12 @@ export function formatContentDisposition(filename: string) {
 	return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
 }
 
-export function getUploadMode(sizeBytes: number) {
-	return sizeBytes >= MULTIPART_THRESHOLD_BYTES ? "multipart" : "single";
+export function getUploadMode(args: { sizeBytes: number; filename: string }): "single" | "multipart" {
+	const ext = getFileExtension(args.filename);
+	if (ext && archiveExtensions.has(ext)) {
+		return "single";
+	}
+	return args.sizeBytes >= MULTIPART_THRESHOLD_BYTES ? "multipart" : "single";
 }
 
 export const attachmentLimits = {

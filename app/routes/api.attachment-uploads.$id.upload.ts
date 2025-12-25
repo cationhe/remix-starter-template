@@ -1,14 +1,15 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { assertNotBanned, requireUser, getClientIp } from "~/lib/auth.server";
+import { assertNotBanned, requireUser } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
-	containsEicarBytes,
 	finalizeUploadToAttachment,
 	getAttachmentsBucket,
 	getUploadRecord,
-	assertArchiveContentsSafe,
+	inspectRarArchiveFile,
+	inspectZipArchiveFile,
 	validateAttachmentMeta,
+	wrapStreamWithEicarScan,
 } from "~/lib/attachments.server";
 
 type ActionData =
@@ -31,7 +32,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
-	const isSuperadminUser = user.role === "superadmin" || user.role === "topadmin";
+	const allowAnyExtension = user.role === "superadmin" || user.role === "topadmin";
 
 	const uploadRecordId = parseId(params.id);
 	if (!uploadRecordId) {
@@ -65,7 +66,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const metaError = validateAttachmentMeta(
 		{ filename: file.name, mimeType: file.type, sizeBytes: file.size },
-		{ isSuperadmin: isSuperadminUser },
+		{ allowAnyExtension },
 	);
 	if (metaError) {
 		return json<ActionData>({ ok: false, error: metaError }, { status: 400 });
@@ -74,21 +75,29 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "文件大小与发起上传时不一致" }, { status: 400 });
 	}
 
+	const traceId = request.headers.get("cf-ray") || "";
+	const ip = request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || null;
+	const userAgent = request.headers.get("User-Agent") || null;
+
 	try {
-		const bucket = getAttachmentsBucket(context);
-		const bytes = new Uint8Array(await file.arrayBuffer());
-		if (containsEicarBytes(bytes)) {
-			throw new Error("病毒扫描未通过");
-		}
-		const extIdx = file.name.lastIndexOf(".");
-		const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
-		if (ext === "zip" || ext === "rar") {
-			const unsafe = assertArchiveContentsSafe(bytes, ext);
-			if (unsafe) {
-				return json<ActionData>({ ok: false, error: unsafe }, { status: 400 });
+		const rawName = String(file.name || "");
+		const idx = rawName.lastIndexOf(".");
+		const ext = idx > 0 && idx < rawName.length - 1 ? rawName.slice(idx + 1).toLowerCase() : "";
+		if (ext === "zip") {
+			const err = await inspectZipArchiveFile(file);
+			if (err) {
+				throw new Response(err, { status: 400 });
 			}
 		}
-		await bucket.put(record.r2Key, bytes, {
+		if (ext === "rar") {
+			const err = await inspectRarArchiveFile(file);
+			if (err) {
+				throw new Response(err, { status: 400 });
+			}
+		}
+
+		const bucket = getAttachmentsBucket(context);
+		await bucket.put(record.r2Key, wrapStreamWithEicarScan(file.stream()), {
 			httpMetadata: { contentType: record.mimeType },
 			customMetadata: {
 				postId: String(record.postId),
@@ -99,23 +108,22 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		await finalizeUploadToAttachment({ context, uploadRecordId });
 		try {
 			const db = getDBFromContext(context);
-			const ip = getClientIp(request);
-			const ua = request.headers.get("User-Agent");
 			await execute(
 				db,
 				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 				[
 					user.id,
-					"attachment_uploaded",
+					"attachment_upload_ok",
 					ip,
-					ua,
+					userAgent,
 					JSON.stringify({
+						traceId,
+						uploader: user.displayName,
 						postId: record.postId,
 						r2Key: record.r2Key,
-						filename: record.filename,
-						ext,
-						mimeType: record.mimeType,
-						sizeBytes: record.sizeBytes,
+						filename: file.name,
+						mimeType: file.type,
+						sizeBytes: file.size,
 					}),
 					Date.now(),
 				],
@@ -136,37 +144,38 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await execute(db, "DELETE FROM attachments WHERE r2_key = ?", [record.r2Key]);
 		} catch {
 		}
+		const message = error instanceof Error ? error.message : "";
 		try {
 			const db = getDBFromContext(context);
-			const ip = getClientIp(request);
-			const ua = request.headers.get("User-Agent");
-			const extIdx = file.name.lastIndexOf(".");
-			const ext = extIdx > 0 && extIdx < file.name.length - 1 ? file.name.slice(extIdx + 1).toLowerCase() : "";
 			await execute(
 				db,
 				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 				[
 					user.id,
-					"attachment_upload_rejected",
+					"attachment_upload_failed",
 					ip,
-					ua,
+					userAgent,
 					JSON.stringify({
+						traceId,
+						uploader: user.displayName,
 						postId: record.postId,
 						r2Key: record.r2Key,
-						filename: record.filename,
-						ext,
-						mimeType: record.mimeType,
-						sizeBytes: record.sizeBytes,
-						message: error instanceof Error ? error.message : "",
+						filename: file.name,
+						mimeType: file.type,
+						sizeBytes: file.size,
+						message: message || (error instanceof Response ? "response_error" : "unknown_error"),
 					}),
 					Date.now(),
 				],
 			);
 		} catch {
 		}
-		if (error instanceof Response) {
-			return json<ActionData>({ ok: false, error: await error.text() }, { status: error.status });
+		if (message.includes("病毒扫描")) {
+			return json<ActionData>({ ok: false, error: traceId ? `病毒扫描未通过（追踪ID：${traceId}）` : "病毒扫描未通过" }, { status: 400 });
 		}
-		return json<ActionData>({ ok: false, error: "上传失败，请稍后重试" }, { status: 500 });
+		if (error instanceof Response) {
+			return json<ActionData>({ ok: false, error: traceId ? `${await error.text()}（追踪ID：${traceId}）` : await error.text() }, { status: error.status });
+		}
+		return json<ActionData>({ ok: false, error: traceId ? `上传失败，请稍后重试（追踪ID：${traceId}）` : "上传失败，请稍后重试" }, { status: 500 });
 	}
 }

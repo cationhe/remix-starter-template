@@ -637,8 +637,8 @@ export default function PostDetailPage() {
 	const uploadsPaused = data.attachmentStorage.paused;
 	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
 	const uploadsPausedMessage = `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
-	const maxFilesPerPost = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
-	const maxTotalPostBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_POST_BYTES;
+	const maxFilesPerPost = attachmentLimits.MAX_ATTACHMENTS_PER_POST;
+	const maxTotalPostBytes = attachmentLimits.MAX_TOTAL_POST_BYTES;
 	const maxFileSizeBytesForUser = attachmentLimits.MAX_FILE_SIZE_BYTES;
 
 	type UploadItem = {
@@ -721,16 +721,16 @@ export default function PostDetailPage() {
 		const name = String(file.name || "");
 		const idx = name.lastIndexOf(".");
 		const ext = idx > 0 ? name.slice(idx + 1).toLowerCase() : "";
-		if (isSuperadminUser) {
-			if (!ext) return "不支持的文件类型";
-		} else {
+		if (!ext) {
+			return "文件必须包含扩展名";
+		}
+			if (isSuperadminUser) return null;
 			const allowed = new Set(["ino", "py", "rar", "zip", "docx", "doc", "pdf", "mp4"]);
-			if (!ext || !allowed.has(ext)) {
+			if (!allowed.has(ext)) {
 				return "不支持的文件类型";
 			}
+			return null;
 		}
-		return null;
-	}
 
 	function isLikelyNetworkError(error: unknown) {
 		if (!error) return false;
@@ -1159,8 +1159,8 @@ export default function PostDetailPage() {
 	async function startCommentUpload(commentId: number, existingAttachments: CommentAttachmentRecord[]) {
 		const current = commentUploads[commentId] || { selectedFiles: [], queue: [], busy: false, error: null };
 		if (current.busy) return;
-		const maxFilesPerComment = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
-		const maxTotalCommentBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
+		const maxFilesPerComment = attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
+		const maxTotalCommentBytes = attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
 		const uploadingCount = current.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
 		const remainingSlots = Math.max(0, maxFilesPerComment - existingAttachments.length - uploadingCount);
 		if (remainingSlots <= 0) {
@@ -1177,7 +1177,7 @@ export default function PostDetailPage() {
 			.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
 		const files = current.selectedFiles.slice(0, remainingSlots);
 		const selectedBytes = files.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
-		if (maxTotalCommentBytes !== Number.POSITIVE_INFINITY && existingBytes + uploadingBytes + selectedBytes > maxTotalCommentBytes) {
+		if (existingBytes + uploadingBytes + selectedBytes > maxTotalCommentBytes) {
 			updateCommentUploads(commentId, (c) => ({
 				...c,
 				error: `已超出单条评论附件总大小上限（${formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}）`,
@@ -1734,7 +1734,7 @@ export default function PostDetailPage() {
 											上传附件
 										</label>
 										<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-													<span>剩余可上传：{isSuperadminUser ? "不限" : remainingSlots} 个</span>
+										<span>剩余可上传：{remainingSlots} 个</span>
 											<span>
 												已选 {formatSize(selectionSize.selectedBytes)} / 剩余 {formatSize(selectionSize.remainingBytes)}
 											</span>
@@ -1854,7 +1854,7 @@ export default function PostDetailPage() {
 							) : null}
 						</div>
 								<div className="flex items-center justify-between">
-										<span className="text-xs text-gray-500 dark:text-gray-400">每帖最多 {maxFilesPerPost === 999 ? "不限" : maxFilesPerPost} 个附件</span>
+										<span className="text-xs text-gray-500 dark:text-gray-400">每帖最多 {maxFilesPerPost} 个附件</span>
 									<button
 										type="button"
 										onClick={startUpload}
@@ -2047,16 +2047,16 @@ export default function PostDetailPage() {
 													<div className="min-w-0">
 														<div className="text-sm font-medium text-gray-900 dark:text-gray-100">上传评论附件</div>
 												<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-													剩余可上传：
-													{(() => {
-														const maxFilesPerComment = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
-														const uploading =
-															commentUploads[comment.id]?.queue.filter((q) => q.status === "pending" || q.status === "uploading")
-																.length || 0;
-														const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploading);
-														return maxFilesPerComment === 999 ? "不限" : String(remaining);
-													})()}
-													个；单条评论总大小上限 {formatSize(isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
+											剩余可上传：
+											{(() => {
+												const maxFilesPerComment = attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
+												const uploading =
+													commentUploads[comment.id]?.queue.filter((q) => q.status === "pending" || q.status === "uploading")
+														.length || 0;
+												const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploading);
+												return String(remaining);
+											})()}
+											个；单条评论总大小上限 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
 												</div>
 													</div>
 													<button
@@ -2084,8 +2084,8 @@ export default function PostDetailPage() {
 													{(() => {
 														const state = commentUploads[comment.id] || { selectedFiles: [], queue: [], busy: false, error: null };
 														const uploadingCount = state.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
-														const maxFilesPerComment = isSuperadminUser ? 999 : attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
-														const maxTotalCommentBytes = isSuperadminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
+													const maxFilesPerComment = attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
+													const maxTotalCommentBytes = attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
 														const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploadingCount);
 														const effective = state.selectedFiles.slice(0, remaining);
 														const existingBytes = comment.attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
@@ -2093,11 +2093,8 @@ export default function PostDetailPage() {
 															.filter((q) => q.status === "pending" || q.status === "uploading")
 															.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
 														const selectedBytes = effective.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
-														const remainingBytes =
-															maxTotalCommentBytes === Number.POSITIVE_INFINITY
-																? Number.POSITIVE_INFINITY
-																: Math.max(0, maxTotalCommentBytes - existingBytes - uploadingBytes);
-														const overLimit = maxTotalCommentBytes === Number.POSITIVE_INFINITY ? false : selectedBytes > remainingBytes;
+													const remainingBytes = Math.max(0, maxTotalCommentBytes - existingBytes - uploadingBytes);
+													const overLimit = selectedBytes > remainingBytes;
 														return (
 															<>
 																<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">

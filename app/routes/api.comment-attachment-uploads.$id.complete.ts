@@ -1,15 +1,16 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { assertNotBanned, requireUser, getClientIp } from "~/lib/auth.server";
+import { assertNotBanned, requireUser } from "~/lib/auth.server";
 import { execute, getDBFromContext } from "~/lib/d1.server";
 import {
 	attachmentLimits,
+	containsEicarBytes,
 	finalizeUploadToCommentAttachment,
 	getAttachmentsBucket,
 	getCommentUploadRecord,
+	inspectRarArchiveBytes,
+	inspectZipArchiveBytes,
 	listUploadedCommentParts,
-	containsEicarBytes,
-	assertArchiveContentsSafe,
 } from "~/lib/attachments.server";
 
 type ActionData =
@@ -37,6 +38,9 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
+	const traceId = request.headers.get("cf-ray") || "";
+	const ip = request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || null;
+	const userAgent = request.headers.get("User-Agent") || null;
 
 	const uploadRecordId = parsePositiveInt(params.id);
 	if (!uploadRecordId) {
@@ -75,63 +79,27 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		const bucket = getAttachmentsBucket(context);
 		const upload = bucket.resumeMultipartUpload(record.r2Key, record.uploadId);
 		await upload.complete(parts.map((p) => ({ partNumber: p.partNumber, etag: p.etag })));
-		// 拉取对象并进行安全检查
-		try {
-			const obj = await bucket.get(record.r2Key);
-			if (!obj) throw new Error("对象不存在");
-			const bytes = new Uint8Array(await obj.arrayBuffer());
-			if (containsEicarBytes(bytes)) {
-				throw new Response("病毒扫描未通过", { status: 400 });
+		const obj = await bucket.get(record.r2Key);
+		if (!obj) {
+			throw new Response("上传对象不存在", { status: 500 });
+		}
+		const bytes = new Uint8Array(await obj.arrayBuffer());
+		if (containsEicarBytes(bytes)) {
+			throw new Response("病毒扫描未通过", { status: 400 });
+		}
+		const idx = String(record.filename || "").lastIndexOf(".");
+		const ext = idx > 0 && idx < record.filename.length - 1 ? record.filename.slice(idx + 1).toLowerCase() : "";
+		if (ext === "zip") {
+			const err = inspectZipArchiveBytes(bytes);
+			if (err) {
+				throw new Response(err, { status: 400 });
 			}
-			const extIdx = record.filename.lastIndexOf(".");
-			const ext = extIdx > 0 && extIdx < record.filename.length - 1 ? record.filename.slice(extIdx + 1).toLowerCase() : "";
-			if (ext === "zip" || ext === "rar") {
-				const unsafe = assertArchiveContentsSafe(bytes, ext);
-				if (unsafe) {
-					throw new Response(unsafe, { status: 400 });
-				}
+		}
+		if (ext === "rar") {
+			const err = inspectRarArchiveBytes(bytes);
+			if (err) {
+				throw new Response(err, { status: 400 });
 			}
-		} catch (scanError) {
-			try {
-				await bucket.delete(record.r2Key);
-			} catch {
-			}
-			try {
-				const db = getDBFromContext(context);
-				await execute(db, "DELETE FROM comment_attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
-				await execute(db, "DELETE FROM comment_attachment_uploads WHERE id = ?", [record.id]);
-				await execute(db, "DELETE FROM comment_attachments WHERE r2_key = ?", [record.r2Key]);
-				const ip = getClientIp(request);
-				const ua = request.headers.get("User-Agent");
-				const extIdx = record.filename.lastIndexOf(".");
-				const ext = extIdx > 0 && extIdx < record.filename.length - 1 ? record.filename.slice(extIdx + 1).toLowerCase() : "";
-				await execute(
-					db,
-					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-					[
-						user.id,
-						"comment_attachment_upload_rejected",
-						ip,
-						ua,
-						JSON.stringify({
-							postId: record.postId,
-							commentId: record.commentId,
-							r2Key: record.r2Key,
-							filename: record.filename,
-							ext,
-							mimeType: record.mimeType,
-							sizeBytes: record.sizeBytes,
-							message: scanError instanceof Response ? "安全检查未通过" : (scanError instanceof Error ? scanError.message : ""),
-						}),
-						Date.now(),
-					],
-				);
-			} catch {
-			}
-			if (scanError instanceof Response) {
-				throw scanError;
-			}
-			throw new Response("安全检查未通过", { status: 400 });
 		}
 		try {
 			await finalizeUploadToCommentAttachment({ context, uploadRecordId });
@@ -151,24 +119,21 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		try {
 			const db = getDBFromContext(context);
-			const ip = getClientIp(request);
-			const ua = request.headers.get("User-Agent");
-			const extIdx = record.filename.lastIndexOf(".");
-			const ext = extIdx > 0 && extIdx < record.filename.length - 1 ? record.filename.slice(extIdx + 1).toLowerCase() : "";
 			await execute(
 				db,
 				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 				[
 					user.id,
-					"comment_attachment_uploaded",
+					"comment_attachment_upload_complete_ok",
 					ip,
-					ua,
+					userAgent,
 					JSON.stringify({
+						traceId,
+						uploader: user.displayName,
 						postId: record.postId,
 						commentId: record.commentId,
 						r2Key: record.r2Key,
 						filename: record.filename,
-						ext,
 						mimeType: record.mimeType,
 						sizeBytes: record.sizeBytes,
 					}),
@@ -179,7 +144,6 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		return json<ActionData>({ ok: true });
 	} catch (error) {
-		const traceId = request.headers.get("cf-ray") || "";
 		console.error("comment_attachment_complete_failed", {
 			uploadRecordId,
 			commentId: record.commentId,
@@ -187,6 +151,45 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			traceId,
 			error,
 		});
+		try {
+			const bucket = getAttachmentsBucket(context);
+			await bucket.delete(record.r2Key);
+		} catch {
+		}
+		try {
+			const db = getDBFromContext(context);
+			await execute(db, "DELETE FROM comment_attachment_upload_parts WHERE upload_record_id = ?", [record.id]);
+			await execute(db, "DELETE FROM comment_attachment_uploads WHERE id = ?", [record.id]);
+			await execute(db, "DELETE FROM comment_attachments WHERE r2_key = ?", [record.r2Key]);
+		} catch {
+		}
+		try {
+			const db = getDBFromContext(context);
+			const message = error instanceof Error ? error.message : "";
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					user.id,
+					"comment_attachment_upload_complete_failed",
+					ip,
+					userAgent,
+					JSON.stringify({
+						traceId,
+						uploader: user.displayName,
+						postId: record.postId,
+						commentId: record.commentId,
+						r2Key: record.r2Key,
+						filename: record.filename,
+						mimeType: record.mimeType,
+						sizeBytes: record.sizeBytes,
+						message: message || (error instanceof Response ? "response_error" : "unknown_error"),
+					}),
+					Date.now(),
+				],
+			);
+		} catch {
+		}
 		if (error instanceof Response) {
 			const text = await error.text();
 			const safe = formatSafeErrorMessage(text);
