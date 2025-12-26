@@ -96,6 +96,8 @@ const normalUserAllowedExtensions = new Set([
 	"mp4",
 ]);
 
+const forbiddenAttachmentExtensions = new Set(["jpg", "jpeg", "png", "gif", "webp", "svg"]);
+
 const archiveExtensions = new Set(["zip", "rar"]);
 
 const forbiddenArchiveInnerExtensions = new Set([
@@ -159,6 +161,9 @@ export function validateAttachmentMeta(
 	const ext = getFileExtension(args.filename);
 	if (!ext) {
 		return "文件必须包含扩展名";
+	}
+	if (forbiddenAttachmentExtensions.has(ext)) {
+		return "严格禁止通过附件上传图片";
 	}
 	if (!options?.allowAnyExtension && !normalUserAllowedExtensions.has(ext)) {
 		return "不支持的文件类型";

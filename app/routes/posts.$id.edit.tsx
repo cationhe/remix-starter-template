@@ -10,7 +10,8 @@ import {
 	useNavigation,
 	useRouteError,
 } from "@remix-run/react";
-import { useMemo } from "react";
+import type { ChangeEvent } from "react";
+import { useMemo, useRef, useState } from "react";
 import { assertNotBanned, getClientIp, requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 
@@ -258,6 +259,10 @@ export default function EditPostPage() {
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
 	const isSubmitting = navigation.state === "submitting";
+	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	const [imageUploading, setImageUploading] = useState(false);
+	const [imageError, setImageError] = useState<string | null>(null);
 
 	const fallbackAreaId = data.areas.length > 0 ? String(data.areas[0].id) : "";
 	const selectedAreaId =
@@ -267,6 +272,131 @@ export default function EditPostPage() {
 		if (!data.post.updatedAt) return "暂无";
 		return new Date(data.post.updatedAt).toLocaleString();
 	}, [data.post.updatedAt]);
+
+	function insertAtCursor(text: string) {
+		const el = textareaRef.current;
+		if (!el) return;
+		const start = typeof el.selectionStart === "number" ? el.selectionStart : el.value.length;
+		const end = typeof el.selectionEnd === "number" ? el.selectionEnd : el.value.length;
+		const before = el.value.slice(0, start);
+		const after = el.value.slice(end);
+		el.value = `${before}${text}${after}`;
+		const next = start + text.length;
+		try {
+			el.setSelectionRange(next, next);
+		} catch {
+		}
+		try {
+			el.dispatchEvent(new Event("input", { bubbles: true }));
+		} catch {
+		}
+		el.focus();
+	}
+
+	async function fetchJson(url: string, init: RequestInit) {
+		const res = await fetch(url, init);
+		let data: any = null;
+		try {
+			data = await res.json();
+		} catch {
+			data = null;
+		}
+		return { res, data };
+	}
+
+	function validateLocalImage(file: File) {
+		const maxBytes = 5 * 1024 * 1024;
+		if (!file) return "缺少文件";
+		if (file.size <= 0) return "缺少文件内容";
+		if (file.size > maxBytes) return "单张图片大小不能超过 5MB";
+		const name = String(file.name || "").toLowerCase();
+		const idx = name.lastIndexOf(".");
+		const ext = idx > 0 ? name.slice(idx + 1) : "";
+		const allowed = new Set(["jpg", "jpeg", "png", "gif", "webp"]);
+		if (!allowed.has(ext)) return "仅支持 JPG、PNG、GIF、WebP 图片";
+		return null;
+	}
+
+	async function initiatePostImageUpload(file: File) {
+		const { res, data: payload } = await fetchJson(`/api/posts/${data.post.id}/images/initiate`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ filename: file.name, mimeType: file.type, sizeBytes: file.size }),
+		});
+		if (!res.ok || !payload?.ok) {
+			throw new Error(String(payload?.error || "创建上传任务失败"));
+		}
+		return payload as { uploadRecordId: number; mode: "single" | "multipart"; partSizeBytes: number | null };
+	}
+
+	async function listUploadedParts(uploadRecordId: number) {
+		const { res, data: payload } = await fetchJson(`/api/post-image-uploads/${uploadRecordId}/parts`, { method: "GET" });
+		if (!res.ok || !payload?.ok || !Array.isArray(payload?.parts)) {
+			return new Set<number>();
+		}
+		return new Set<number>(payload.parts.map((p: any) => Number(p)).filter((n: any) => Number.isFinite(n) && n > 0));
+	}
+
+	async function uploadSingle(uploadRecordId: number, file: File) {
+		const form = new FormData();
+		form.append("file", file);
+		const { res, data: payload } = await fetchJson(`/api/post-image-uploads/${uploadRecordId}/upload`, { method: "POST", body: form });
+		if (!res.ok || !payload?.ok) {
+			throw new Error(String(payload?.error || "上传失败"));
+		}
+		return Number(payload.imageId);
+	}
+
+	async function uploadMultipart(uploadRecordId: number, file: File, partSizeBytes: number) {
+		const totalParts = Math.ceil(file.size / partSizeBytes);
+		const already = await listUploadedParts(uploadRecordId);
+		for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+			if (already.has(partNumber)) continue;
+			const start = (partNumber - 1) * partSizeBytes;
+			const end = Math.min(file.size, partNumber * partSizeBytes);
+			const chunk = file.slice(start, end);
+			const body = await chunk.arrayBuffer();
+			const { res, data: payload } = await fetchJson(`/api/post-image-uploads/${uploadRecordId}/parts/${partNumber}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/octet-stream" },
+				body,
+			});
+			if (!res.ok || !payload?.ok) {
+				throw new Error(String(payload?.error || "上传分块失败"));
+			}
+		}
+		const { res: doneRes, data: done } = await fetchJson(`/api/post-image-uploads/${uploadRecordId}/complete`, {
+			method: "POST",
+		});
+		if (!doneRes.ok || !done?.ok) {
+			throw new Error(String(done?.error || "完成上传失败"));
+		}
+		return Number(done.imageId);
+	}
+
+	async function onPickImage(e: ChangeEvent<HTMLInputElement>) {
+		const file = e.target.files?.[0] || null;
+		e.target.value = "";
+		if (!file) return;
+		setImageError(null);
+		const localErr = validateLocalImage(file);
+		if (localErr) {
+			setImageError(localErr);
+			return;
+		}
+		setImageUploading(true);
+		try {
+			const init = await initiatePostImageUpload(file);
+			const partSize = init.partSizeBytes || 1024 * 1024;
+			const imageId = init.mode === "single" ? await uploadSingle(init.uploadRecordId, file) : await uploadMultipart(init.uploadRecordId, file, partSize);
+			insertAtCursor(`[[img:${imageId}]]`);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "插图上传失败";
+			setImageError(message || "插图上传失败");
+		} finally {
+			setImageUploading(false);
+		}
+	}
 
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -308,14 +438,35 @@ export default function EditPostPage() {
 						) : null}
 					</div>
 					<div>
-						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">内容</label>
+						<div className="mb-1 flex items-center justify-between gap-3">
+							<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">内容</label>
+							<div className="flex items-center gap-2">
+								<input
+									ref={fileInputRef}
+									type="file"
+									accept="image/jpeg,image/png,image/gif,image/webp"
+									onChange={onPickImage}
+									className="hidden"
+								/>
+								<button
+									type="button"
+									onClick={() => fileInputRef.current?.click()}
+									disabled={isSubmitting || imageUploading}
+									className="rounded border border-gray-300 px-3 py-1 text-xs font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-70 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+								>
+									{imageUploading ? "上传中..." : "插入图片"}
+								</button>
+							</div>
+						</div>
 						<textarea
+							ref={textareaRef}
 							name="content"
 							rows={10}
 							required
 							defaultValue={actionData?.fields?.content ?? data.post.content}
 							className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
 						/>
+						{imageError ? <p className="mt-1 text-xs text-red-600">{imageError}</p> : null}
 						{actionData?.fieldErrors?.content ? (
 							<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.content}</p>
 						) : null}

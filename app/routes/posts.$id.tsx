@@ -23,6 +23,7 @@ import {
 } from "~/lib/attachments.server";
 import { formatTotalStorageLimit } from "~/lib/attachment-storage";
 import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachments.server";
+import { splitPostContentParts } from "~/lib/post-content";
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 10,
@@ -730,6 +731,7 @@ export default function PostDetailPage() {
 	const canManageAttachments = Boolean(isAuthor && !isBanned);
 	const uploadsPaused = data.attachmentStorage.paused;
 	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
+	const contentParts = useMemo(() => splitPostContentParts(data.post.content), [data.post.content]);
 	const uploadsPausedMessage = `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
 	const maxFilesPerPost = isAdminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
 	const maxTotalPostBytes = attachmentLimits.MAX_TOTAL_POST_BYTES;
@@ -1729,9 +1731,23 @@ export default function PostDetailPage() {
 								</div>
 							</div>
 						) : null}
-						<div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-800 dark:text-gray-100">
-							{data.post.content}
-						</div>
+					<div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-800 dark:text-gray-100">
+						{contentParts.map((p, idx) => {
+							if (p.type === "image") {
+								return (
+									<span key={`img_${p.imageId}_${idx}`} className="my-3 block">
+										<img
+											src={`/post-images/${p.imageId}`}
+											alt={`插图 ${p.imageId}`}
+											loading="lazy"
+											className="mx-auto block max-h-[560px] w-auto max-w-full rounded border border-gray-200 bg-white dark:border-gray-700"
+										/>
+									</span>
+								);
+							}
+							return <span key={`txt_${idx}`}>{p.text}</span>;
+						})}
+					</div>
 					</section>
 					{data.postEdits.length > 0 ? (
 						<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
