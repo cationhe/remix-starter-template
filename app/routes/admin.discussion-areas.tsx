@@ -76,7 +76,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
 	if (me.role !== "superadmin" && me.role !== "topadmin") {
-		throw new Response("只有超级管理员可访问", { status: 403 });
+		throw new Response("只有超级管理员或站点管理员可访问", { status: 403 });
 	}
 	const db = getDBFromContext(context);
 	const areas = await queryAll<DiscussionAreaRow>(
@@ -90,7 +90,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
 	if (me.role !== "superadmin" && me.role !== "topadmin") {
-		return json<ActionData>({ formError: "只有超级管理员可访问" }, { status: 403 });
+		return json<ActionData>({ formError: "只有超级管理员或站点管理员可访问" }, { status: 403 });
 	}
 
 	const formData = await request.formData();
@@ -308,6 +308,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 
 	if (intent === "reorderAreas") {
+		if (me.role !== "superadmin") {
+			return json<ActionData>({ formError: "只有超级管理员可调整讨论区顺序" }, { status: 403 });
+		}
 		const password = String(formData.get("password") || "").trim();
 		if (!password) {
 			return json<ActionData>({ formError: "需要二次验证密码" }, { status: 400 });
@@ -384,9 +387,11 @@ export default function AdminDiscussionAreasPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
+	const canReorder = data.me.role === "superadmin";
 	const initialAreas = useMemo(() => data.areas, [data.areas]);
 	const [areas, setAreas] = useState(() => initialAreas);
 	const [draggingId, setDraggingId] = useState<number | null>(null);
+	const [manualOrderById, setManualOrderById] = useState<Record<number, string>>({});
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [dialogIntent, setDialogIntent] = useState<DialogIntent>("reorderAreas");
 	const [dialogAreaId, setDialogAreaId] = useState<number | null>(null);
@@ -396,6 +401,7 @@ export default function AdminDiscussionAreasPage() {
 
 	useEffect(() => {
 		setAreas(initialAreas);
+		setManualOrderById({});
 	}, [initialAreas]);
 
 	useEffect(() => {
@@ -412,6 +418,7 @@ export default function AdminDiscussionAreasPage() {
 	}, [actionData?.formError, dialogSubmitting, navigation.state]);
 
 	function openDialog(next: { intent: DialogIntent; areaId?: number; hidden?: 0 | 1 }) {
+		if (next.intent === "reorderAreas" && !canReorder) return;
 		setDialogIntent(next.intent);
 		setDialogAreaId(typeof next.areaId === "number" ? next.areaId : null);
 		setDialogHidden(next.hidden ?? 0);
@@ -421,6 +428,7 @@ export default function AdminDiscussionAreasPage() {
 	}
 
 	function moveArea(dragId: number, overId: number) {
+		if (!canReorder) return;
 		if (dragId === overId) return;
 		setAreas((prev) => {
 			const from = prev.findIndex((a) => a.id === dragId);
@@ -433,6 +441,33 @@ export default function AdminDiscussionAreasPage() {
 		});
 	}
 
+	function applyManualOrder(areaId: number, raw: string, currentIndex: number) {
+		if (!canReorder) return;
+		const nextNum = Math.floor(Number(String(raw || "").trim()));
+		if (!Number.isFinite(nextNum)) {
+			setManualOrderById((prev) => {
+				const next = { ...prev };
+				delete next[areaId];
+				return next;
+			});
+			return;
+		}
+		const toIndex = Math.max(0, Math.min(areas.length - 1, nextNum - 1));
+		setAreas((prev) => {
+			const from = prev.findIndex((a) => a.id === areaId);
+			if (from === -1) return prev;
+			const next = prev.slice();
+			const [item] = next.splice(from, 1);
+			next.splice(toIndex, 0, item);
+			return next;
+		});
+		setManualOrderById((prev) => {
+			const next = { ...prev };
+			delete next[areaId];
+			return next;
+		});
+	}
+
 	const dialogArea = dialogAreaId ? areas.find((a) => a.id === dialogAreaId) ?? null : null;
 	const orderJson = useMemo(() => JSON.stringify(areas.map((a) => a.id)), [areas]);
 	const hasOrderChanged = useMemo(() => {
@@ -440,6 +475,7 @@ export default function AdminDiscussionAreasPage() {
 		const b = areas.map((x) => x.id).join(",");
 		return a !== b;
 	}, [areas, initialAreas]);
+	const previewAreas = useMemo(() => areas.filter((a) => !a.isHidden), [areas]);
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -505,10 +541,10 @@ export default function AdminDiscussionAreasPage() {
 						<div className="text-sm font-medium text-gray-900 dark:text-gray-100">讨论区列表</div>
 						<button
 							type="button"
-							disabled={!hasOrderChanged}
+							disabled={!canReorder || !hasOrderChanged}
 							onClick={() => openDialog({ intent: "reorderAreas" })}
 							className={
-								hasOrderChanged
+								canReorder && hasOrderChanged
 									? "rounded bg-amber-600 px-3 py-1 text-sm font-medium text-white hover:bg-amber-700"
 									: "rounded bg-gray-200 px-3 py-1 text-sm font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-300"
 							}
@@ -516,6 +552,9 @@ export default function AdminDiscussionAreasPage() {
 							保存排序
 						</button>
 					</div>
+					{!canReorder ? (
+						<div className="px-4 pb-3 text-xs text-gray-500 dark:text-gray-400">只有超级管理员可调整讨论区顺序</div>
+					) : null}
 					<table className="w-full table-auto text-left text-sm">
 						<thead className="bg-gray-100 text-xs text-gray-600 dark:bg-gray-900/30 dark:text-gray-300">
 							<tr>
@@ -530,11 +569,15 @@ export default function AdminDiscussionAreasPage() {
 							{areas.map((a, index) => {
 								const isDefault = a.id === 1;
 								const hidden = Boolean(a.isHidden);
+								const manualValue = manualOrderById[a.id];
 								return (
 									<tr
 										key={a.id}
-										draggable
-										onDragStart={() => setDraggingId(a.id)}
+										draggable={canReorder}
+										onDragStart={() => {
+											if (!canReorder) return;
+											setDraggingId(a.id);
+										}}
 										onDragEnd={() => setDraggingId(null)}
 										onDragOver={(e) => {
 											e.preventDefault();
@@ -547,7 +590,25 @@ export default function AdminDiscussionAreasPage() {
 										}
 									>
 										<td className="px-4 py-3 text-gray-700 dark:text-gray-200">
-											{index + 1}
+											{canReorder ? (
+												<input
+													type="number"
+													min={1}
+													max={areas.length}
+													value={typeof manualValue === "string" ? manualValue : String(index + 1)}
+													onChange={(e) =>
+														setManualOrderById((prev) => ({ ...prev, [a.id]: e.target.value }))
+													}
+													onBlur={(e) => applyManualOrder(a.id, e.target.value, index)}
+													onKeyDown={(e) => {
+														if (e.key !== "Enter") return;
+														(e.currentTarget as HTMLInputElement).blur();
+													}}
+													className="w-16 rounded border border-gray-300 px-2 py-1 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+												/>
+											) : (
+												<span>{index + 1}</span>
+											)}
 										</td>
 										<td className="px-4 py-3">
 											<Form method="post" className="flex items-center gap-2">
@@ -583,10 +644,10 @@ export default function AdminDiscussionAreasPage() {
 												<button
 													type="button"
 													onClick={() =>
-														openDialog({ intent: "setHidden", areaId: a.id, hidden: hidden ? 0 : 1 })
-													}
-													className={
-														hidden
+													openDialog({ intent: "setHidden", areaId: a.id, hidden: hidden ? 0 : 1 })
+												}
+												className={
+													hidden
 														? "rounded bg-green-600 px-3 py-1 text-sm font-medium text-white hover:bg-green-700"
 														: "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
 													}
@@ -605,12 +666,46 @@ export default function AdminDiscussionAreasPage() {
 													<span className="text-xs text-gray-500 dark:text-gray-400">默认</span>
 												)}
 											</div>
-										</td>
-									</tr>
-								);
-							})}
-						</tbody>
-					</table>
+									</td>
+								</tr>
+							);
+						})}
+					</tbody>
+				</table>
+			</div>
+
+				<div className="rounded-xl bg-white p-4 shadow dark:bg-gray-800">
+					<div className="flex items-center justify-between">
+						<div className="text-sm font-medium text-gray-900 dark:text-gray-100">主页预览</div>
+						<Link
+							to="/posts"
+							className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+						>
+							打开前台
+						</Link>
+					</div>
+					<p className="mt-2 text-xs text-gray-500 dark:text-gray-400">按普通用户可见的讨论区顺序展示</p>
+					{previewAreas.length === 0 ? (
+						<div className="mt-3 rounded border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-900/20 dark:text-gray-300">
+							当前没有公开讨论区
+						</div>
+					) : (
+						<div className="mt-3 flex flex-col gap-3">
+							{previewAreas.map((area) => (
+								<section key={area.id} className="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900/10">
+									<div className="flex items-center justify-between px-4 py-3">
+										<h3 className="text-sm font-semibold">
+											<Link to={`/areas/${area.id}`} className="text-blue-700 hover:underline dark:text-blue-400">
+												{area.name}
+											</Link>
+										</h3>
+										<span className="text-xs text-gray-500 dark:text-gray-400">仅展示最新 5 帖</span>
+									</div>
+									<div className="px-4 pb-4 text-xs text-gray-600 dark:text-gray-300">当前帖子数：{area.postCount}</div>
+								</section>
+							))}
+						</div>
+					)}
 				</div>
 
 				{dialogOpen ? (
@@ -654,7 +749,7 @@ export default function AdminDiscussionAreasPage() {
 								</div>
 							) : (
 								<div className="mt-4 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700 dark:border-blue-900/50 dark:bg-blue-900/20 dark:text-blue-200">
-									拖拽行即可调整顺序，保存后前台展示顺序会更新。
+									可拖拽或输入数字调整顺序，保存后前台展示顺序会更新。
 								</div>
 							)}
 
