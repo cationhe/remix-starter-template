@@ -19,12 +19,15 @@ import {
 	getAttachmentsBucket,
 	listAttachmentsByPostId,
 	listCommentAttachmentsByCommentIds,
+	removeAllCommentAttachmentUploadsForComments,
 	removeAllAttachmentsForPost,
+	removeAllCommentAttachmentsForComments,
 	removeAllCommentAttachmentsForPost,
 } from "~/lib/attachments.server";
 import { formatTotalStorageLimit } from "~/lib/attachment-storage";
 import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachments.server";
 import { splitPostContentParts } from "~/lib/post-content";
+import { sendMessage } from "~/lib/messages.server";
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 10,
@@ -76,8 +79,14 @@ type CommentItem = {
 	id: number;
 	content: string;
 	createdAt: number;
+	updatedAt: number | null;
 	authorId: number;
 	authorName: string;
+	isShielded: number;
+	shieldedAt: number | null;
+	shieldedBy: number | null;
+	shieldedByName: string | null;
+	shieldReason: string | null;
 	attachments: CommentAttachmentRecord[];
 };
 
@@ -194,11 +203,25 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		likedByMe = Boolean(liked?.liked);
 	}
 
-	const comments = await queryAll<CommentItem>(
-		db,
-		"SELECT comments.id as id, comments.content as content, comments.created_at as createdAt, comments.author_id as authorId, users.display_name as authorName FROM comments JOIN users ON comments.author_id = users.id WHERE comments.post_id = ? AND comments.deleted_at IS NULL ORDER BY comments.created_at ASC LIMIT ? OFFSET ?",
-		[id, pageSize, offset],
-	);
+	let comments: CommentItem[] = [];
+	try {
+		comments = await queryAll<CommentItem>(
+			db,
+			"SELECT c.id as id, c.content as content, c.created_at as createdAt, c.updated_at as updatedAt, c.author_id as authorId, u.display_name as authorName, c.is_shielded as isShielded, c.shielded_at as shieldedAt, c.shielded_by as shieldedBy, su.display_name as shieldedByName, c.shield_reason as shieldReason FROM comments c JOIN users u ON c.author_id = u.id LEFT JOIN users su ON c.shielded_by = su.id WHERE c.post_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
+			[id, pageSize, offset],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") || message.includes("no such table")) {
+			comments = await queryAll<CommentItem>(
+				db,
+				"SELECT c.id as id, c.content as content, c.created_at as createdAt, NULL as updatedAt, c.author_id as authorId, u.display_name as authorName, 0 as isShielded, NULL as shieldedAt, NULL as shieldedBy, NULL as shieldedByName, NULL as shieldReason FROM comments c JOIN users u ON c.author_id = u.id WHERE c.post_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
+				[id, pageSize, offset],
+			);
+		} else {
+			throw error;
+		}
+	}
 
 	const commentAttachmentRows = await listCommentAttachmentsByCommentIds(
 		context,
@@ -686,6 +709,262 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 	}
 
+	if (intent === "deleteComment") {
+		const commentIdRaw = String(formData.get("commentId") || "");
+		const commentId = Number(commentIdRaw);
+		if (!commentIdRaw || Number.isNaN(commentId) || commentId <= 0) {
+			return json({ ok: false, error: "无效的评论ID" }, { status: 400 });
+		}
+		const comment = await queryOne<{ authorId: number; postId: number }>(
+			db,
+			"SELECT author_id as authorId, post_id as postId FROM comments WHERE id = ? AND deleted_at IS NULL",
+			[commentId],
+		);
+		if (!comment) {
+			return json({ ok: false, error: "评论不存在" }, { status: 404 });
+		}
+		if (comment.postId !== postId) {
+			return json({ ok: false, error: "评论不属于当前帖子" }, { status: 400 });
+		}
+		if (comment.authorId !== userId) {
+			return json({ ok: false, error: "无权删除该评论" }, { status: 403 });
+		}
+		try {
+			await removeAllCommentAttachmentUploadsForComments(context, [commentId]);
+			await removeAllCommentAttachmentsForComments(context, [commentId]);
+			await execute(db, "DELETE FROM comments WHERE id = ? AND author_id = ? AND post_id = ?", [commentId, userId, postId]);
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "comment_deleted", ip, userAgent, JSON.stringify({ postId, commentId }), Date.now()],
+				);
+			} catch {
+			}
+			if (wantsJson) return json({ ok: true, deletedCommentId: commentId });
+			return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+		} catch (error) {
+			if (error instanceof Response) {
+				return json({ ok: false, error: await error.text() }, { status: error.status });
+			}
+			return json({ ok: false, error: "删除失败，请稍后重试" }, { status: 500 });
+		}
+	}
+
+	if (intent === "editComment") {
+		const commentIdRaw = String(formData.get("commentId") || "");
+		const commentId = Number(commentIdRaw);
+		if (!commentIdRaw || Number.isNaN(commentId) || commentId <= 0) {
+			return json({ ok: false, error: "无效的评论ID" }, { status: 400 });
+		}
+		const content = String(formData.get("content") || "").trim();
+		if (!content) {
+			return json({ ok: false, error: "请输入评论内容" }, { status: 400 });
+		}
+		if (content.length > 2000) {
+			return json({ ok: false, error: "评论内容过长（最多 2000 字）" }, { status: 400 });
+		}
+		let comment: { authorId: number; postId: number; isShielded: number; content: string } | null = null;
+		try {
+			comment = await queryOne<{ authorId: number; postId: number; isShielded: number; content: string }>(
+				db,
+				"SELECT author_id as authorId, post_id as postId, is_shielded as isShielded, content as content FROM comments WHERE id = ? AND deleted_at IS NULL",
+				[commentId],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such column") && message.includes("is_shielded")) {
+				comment = await queryOne<{ authorId: number; postId: number; isShielded: number; content: string }>(
+					db,
+					"SELECT author_id as authorId, post_id as postId, 0 as isShielded, content as content FROM comments WHERE id = ? AND deleted_at IS NULL",
+					[commentId],
+				);
+			} else {
+				throw error;
+			}
+		}
+		if (!comment) {
+			return json({ ok: false, error: "评论不存在" }, { status: 404 });
+		}
+		if (comment.postId !== postId) {
+			return json({ ok: false, error: "评论不属于当前帖子" }, { status: 400 });
+		}
+		if (comment.authorId !== userId) {
+			return json({ ok: false, error: "无权编辑该评论" }, { status: 403 });
+		}
+		if (comment.isShielded) {
+			return json({ ok: false, error: "该评论已被屏蔽，无法编辑" }, { status: 403 });
+		}
+		const now = Date.now();
+		try {
+			await execute(
+				db,
+				"UPDATE comments SET content = ?, updated_at = ?, updated_by = ? WHERE id = ? AND author_id = ? AND post_id = ? AND deleted_at IS NULL",
+				[content, now, userId, commentId, userId, postId],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such column") && (message.includes("updated_at") || message.includes("updated_by"))) {
+				await execute(
+					db,
+					"UPDATE comments SET content = ? WHERE id = ? AND author_id = ? AND post_id = ? AND deleted_at IS NULL",
+					[content, commentId, userId, postId],
+				);
+			} else {
+				throw error;
+			}
+		}
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "comment_edited", ip, userAgent, JSON.stringify({ postId, commentId }), now],
+			);
+		} catch {
+		}
+		if (wantsJson) return json({ ok: true, comment: { id: commentId, content, updatedAt: now } });
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "shieldComment") {
+		assertAdmin(user);
+		const commentIdRaw = String(formData.get("commentId") || "");
+		const commentId = Number(commentIdRaw);
+		if (!commentIdRaw || Number.isNaN(commentId) || commentId <= 0) {
+			return json({ ok: false, error: "无效的评论ID" }, { status: 400 });
+		}
+		const reason = String(formData.get("reason") || "").trim();
+		if (!reason) {
+			return json({ ok: false, error: "请输入屏蔽原因" }, { status: 400 });
+		}
+		if (reason.length > 200) {
+			return json({ ok: false, error: "屏蔽原因过长（最多 200 字）" }, { status: 400 });
+		}
+		let row: { content: string; authorId: number; postId: number; isShielded: number } | null = null;
+		try {
+			row = await queryOne<{ content: string; authorId: number; postId: number; isShielded: number }>(
+				db,
+				"SELECT content as content, author_id as authorId, post_id as postId, is_shielded as isShielded FROM comments WHERE id = ? AND deleted_at IS NULL",
+				[commentId],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such column") && message.includes("is_shielded")) {
+				return json({ ok: false, error: "数据库未升级：缺少评论屏蔽字段" }, { status: 500 });
+			}
+			throw error;
+		}
+		if (!row) {
+			return json({ ok: false, error: "评论不存在" }, { status: 404 });
+		}
+		if (row.postId !== postId) {
+			return json({ ok: false, error: "评论不属于当前帖子" }, { status: 400 });
+		}
+		if (row.isShielded) {
+			return json({ ok: false, error: "评论已被屏蔽" }, { status: 400 });
+		}
+		const post = await queryOne<{ title: string }>(db, "SELECT title as title FROM posts WHERE id = ? AND deleted_at IS NULL", [postId]);
+		if (!post) {
+			return json({ ok: false, error: "帖子不存在" }, { status: 404 });
+		}
+		const now = Date.now();
+		try {
+			await execute(
+				db,
+				"UPDATE comments SET is_shielded = 1, shielded_at = ?, shielded_by = ?, shield_reason = ? WHERE id = ? AND post_id = ? AND deleted_at IS NULL",
+				[now, userId, reason, commentId, postId],
+			);
+			await execute(
+				db,
+				"INSERT INTO comment_shields (comment_id, post_id, comment_author_id, operator_id, reason, content_snapshot, post_title_snapshot, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				[commentId, postId, row.authorId, userId, reason, row.content, post.title, now],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such table") || message.includes("no such column")) {
+				return json({ ok: false, error: "数据库未升级：请先应用最新迁移" }, { status: 500 });
+			}
+			throw error;
+		}
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "comment_shielded", ip, userAgent, JSON.stringify({ postId, commentId, commentAuthorId: row.authorId, reason }), now],
+			);
+		} catch {
+		}
+		if (row.authorId !== userId) {
+			const content =
+				"评论被屏蔽通知\n" +
+				`帖子：${post.title}\n` +
+				`评论ID：${commentId}\n` +
+				`原因：${reason}\n` +
+				`时间：${new Date(now).toLocaleString()}`;
+			try {
+				await sendMessage(context, { sender: user, recipientId: row.authorId, content });
+			} catch {
+			}
+		}
+		if (wantsJson) return json({ ok: true, commentId, shieldedAt: now, shieldedBy: userId, shieldedByName: user.displayName, shieldReason: reason });
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "unshieldComment") {
+		if (!isSuperadmin(user)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "comment_unshield_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json({ ok: false, error: "只有超级管理员或站点管理员可以解除屏蔽" }, { status: 403 });
+		}
+		const commentIdRaw = String(formData.get("commentId") || "");
+		const commentId = Number(commentIdRaw);
+		if (!commentIdRaw || Number.isNaN(commentId) || commentId <= 0) {
+			return json({ ok: false, error: "无效的评论ID" }, { status: 400 });
+		}
+		let comment: { postId: number; authorId: number } | null = null;
+		try {
+			comment = await queryOne<{ postId: number; authorId: number }>(
+				db,
+				"SELECT post_id as postId, author_id as authorId FROM comments WHERE id = ? AND deleted_at IS NULL",
+				[commentId],
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such column") || message.includes("no such table")) {
+				return json({ ok: false, error: "数据库未升级：请先应用最新迁移" }, { status: 500 });
+			}
+			throw error;
+		}
+		if (!comment) {
+			return json({ ok: false, error: "评论不存在" }, { status: 404 });
+		}
+		if (comment.postId !== postId) {
+			return json({ ok: false, error: "评论不属于当前帖子" }, { status: 400 });
+		}
+		const now = Date.now();
+		await execute(
+			db,
+			"UPDATE comments SET is_shielded = 0, shielded_at = NULL, shielded_by = NULL, shield_reason = NULL WHERE id = ? AND post_id = ? AND deleted_at IS NULL",
+			[commentId, postId],
+		);
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "comment_unshielded", ip, userAgent, JSON.stringify({ postId, commentId }), now],
+			);
+		} catch {
+		}
+		if (wantsJson) return json({ ok: true, commentId });
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
 	if (intent !== "comment") {
 		return json<ActionData>({ formError: "未知操作" }, { status: 400 });
 	}
@@ -706,6 +985,9 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const fieldErrors: ActionData["fieldErrors"] = {};
 	if (!content) {
 		fieldErrors.content = "请输入评论内容";
+	}
+	if (!fieldErrors.content && content.length > 2000) {
+		fieldErrors.content = "评论内容过长（最多 2000 字）";
 	}
 	if (fieldErrors.content) {
 		return json<ActionData>({ fieldErrors }, { status: 400 });
@@ -772,7 +1054,12 @@ export default function PostDetailPage() {
 	};
 
 	const [attachments, setAttachments] = useState<AttachmentRecord[]>(data.attachments);
+	type CommentBusyMap = Record<number, boolean>;
 	const [comments, setComments] = useState<CommentItem[]>(data.comments);
+	const [commentCount, setCommentCount] = useState<number>(data.commentCount);
+	const [commentBusyIds, setCommentBusyIds] = useState<CommentBusyMap>({});
+	const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
+	const [editingDraft, setEditingDraft] = useState<string>("");
 
 	const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 	const [queue, setQueue] = useState<UploadItem[]>([]);
@@ -907,6 +1194,7 @@ export default function PostDetailPage() {
 	useEffect(() => {
 		setAttachments(data.attachments);
 		setComments(data.comments);
+		setCommentCount(data.commentCount);
 		setSelectedFiles([]);
 		setQueue([]);
 		setBusy(false);
@@ -978,6 +1266,7 @@ export default function PostDetailPage() {
 		if (!data.user || ids.length === 0 || isBanned) return;
 		const comment = comments.find((c) => c.id === commentId);
 		if (!comment || comment.authorId !== data.user.id) return;
+		if (comment.isShielded) return;
 		const names = comment.attachments.filter((a) => ids.includes(a.id)).map((a) => a.filename);
 		const ok = window.confirm(
 			ids.length === 1
@@ -1025,6 +1314,180 @@ export default function PostDetailPage() {
 				for (const id of ids) delete next[id];
 				return next;
 			});
+		}
+	}
+
+	function setCommentBusy(commentId: number, busy: boolean) {
+		setCommentBusyIds((prev) => ({ ...prev, [commentId]: busy }));
+	}
+
+	async function deleteComment(commentId: number) {
+		if (!data.user || isBanned) return;
+		const comment = comments.find((c) => c.id === commentId);
+		if (!comment || comment.authorId !== data.user.id) return;
+		const ok = window.confirm("确认永久删除该评论吗？\n\n删除后不可恢复。");
+		if (!ok) return;
+		setGlobalError(null);
+		setCommentBusy(commentId, true);
+		const form = new FormData();
+		form.append("intent", "deleteComment");
+		form.append("commentId", String(commentId));
+		try {
+			const res = await fetchWithRetry(`${window.location.pathname}${window.location.search}`, {
+				method: "POST",
+				headers: { Accept: "application/json" },
+				body: form,
+			}, { timeoutMs: 8000, retries: 2 });
+			const data = (await res.json()) as any;
+			if (!res.ok || !data?.ok) throw new Error(String(data?.error || "删除失败"));
+			setComments((prev) => prev.filter((c) => c.id !== commentId));
+			setCommentCount((prev) => Math.max(0, prev - 1));
+			setCommentSelectedAttachmentIds((prev) => {
+				const next = { ...prev };
+				delete next[commentId];
+				return next;
+			});
+			if (editingCommentId === commentId) {
+				setEditingCommentId(null);
+				setEditingDraft("");
+			}
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "删除失败");
+		} finally {
+			setCommentBusy(commentId, false);
+		}
+	}
+
+	function startEditComment(commentId: number) {
+		if (!data.user || isBanned) return;
+		const comment = comments.find((c) => c.id === commentId);
+		if (!comment || comment.authorId !== data.user.id) return;
+		if (comment.isShielded) return;
+		setEditingCommentId(commentId);
+		setEditingDraft(comment.content);
+		setGlobalError(null);
+	}
+
+	function cancelEditComment() {
+		setEditingCommentId(null);
+		setEditingDraft("");
+		setGlobalError(null);
+	}
+
+	async function saveEditComment(commentId: number) {
+		if (!data.user || isBanned) return;
+		const comment = comments.find((c) => c.id === commentId);
+		if (!comment || comment.authorId !== data.user.id) return;
+		const trimmed = editingDraft.trim();
+		if (!trimmed) {
+			setGlobalError("请输入评论内容");
+			return;
+		}
+		if (trimmed.length > 2000) {
+			setGlobalError("评论内容过长（最多 2000 字）");
+			return;
+		}
+		setGlobalError(null);
+		setCommentBusy(commentId, true);
+		const form = new FormData();
+		form.append("intent", "editComment");
+		form.append("commentId", String(commentId));
+		form.append("content", trimmed);
+		try {
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`${window.location.pathname}${window.location.search}`,
+				{ method: "POST", headers: { Accept: "application/json" }, body: form },
+				{ timeoutMs: 8000, retries: 2 },
+			);
+			if (!res.ok || !data?.ok) throw new Error(String(data?.error || "保存失败"));
+			const updatedAt = Number(data?.comment?.updatedAt || Date.now());
+			setComments((prev) =>
+				prev.map((c) => (c.id === commentId ? { ...c, content: trimmed, updatedAt } : c)),
+			);
+			setEditingCommentId(null);
+			setEditingDraft("");
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "保存失败");
+		} finally {
+			setCommentBusy(commentId, false);
+		}
+	}
+
+	async function shieldComment(commentId: number) {
+		if (!isAdminUser) return;
+		const comment = comments.find((c) => c.id === commentId);
+		if (!comment || comment.isShielded) return;
+		const reason = window.prompt("请输入屏蔽原因（最多 200 字）：", "");
+		if (reason === null) return;
+		const trimmed = String(reason).trim();
+		if (!trimmed) {
+			setGlobalError("请输入屏蔽原因");
+			return;
+		}
+		setGlobalError(null);
+		setCommentBusy(commentId, true);
+		const form = new FormData();
+		form.append("intent", "shieldComment");
+		form.append("commentId", String(commentId));
+		form.append("reason", trimmed);
+		try {
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`${window.location.pathname}${window.location.search}`,
+				{ method: "POST", headers: { Accept: "application/json" }, body: form },
+				{ timeoutMs: 8000, retries: 2 },
+			);
+			if (!res.ok || !data?.ok) throw new Error(String(data?.error || "屏蔽失败"));
+			setComments((prev) =>
+				prev.map((c) =>
+					c.id === commentId
+						? {
+							...c,
+							isShielded: 1,
+							shieldedAt: Number(data?.shieldedAt || Date.now()),
+							shieldedBy: Number(data?.shieldedBy || 0) || null,
+							shieldedByName: String(data?.shieldedByName || "") || null,
+							shieldReason: String(data?.shieldReason || trimmed),
+						}
+						: c,
+				),
+			);
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "屏蔽失败");
+		} finally {
+			setCommentBusy(commentId, false);
+		}
+	}
+
+	async function unshieldComment(commentId: number) {
+		if (!isSuperadminUser) return;
+		const comment = comments.find((c) => c.id === commentId);
+		if (!comment || !comment.isShielded) return;
+		const ok = window.confirm("确认解除屏蔽该评论吗？");
+		if (!ok) return;
+		setGlobalError(null);
+		setCommentBusy(commentId, true);
+		const form = new FormData();
+		form.append("intent", "unshieldComment");
+		form.append("commentId", String(commentId));
+		try {
+			const { res, data } = await fetchJsonWithRetry<any>(
+				`${window.location.pathname}${window.location.search}`,
+				{ method: "POST", headers: { Accept: "application/json" }, body: form },
+				{ timeoutMs: 8000, retries: 2 },
+			);
+			if (!res.ok || !data?.ok) throw new Error(String(data?.error || "解除失败"));
+			setComments((prev) =>
+				prev.map((c) =>
+					c.id === commentId
+						?
+							{ ...c, isShielded: 0, shieldedAt: null, shieldedBy: null, shieldedByName: null, shieldReason: null }
+							: c,
+				),
+			);
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "解除失败");
+		} finally {
+			setCommentBusy(commentId, false);
 		}
 	}
 
@@ -2118,31 +2581,124 @@ export default function PostDetailPage() {
 						) : null}
 					</section>
 					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
-						<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
-							评论（{data.commentCount}）
-						</h2>
+		<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
+			评论（{commentCount}）
+		</h2>
 						{comments.length === 0 ? (
 							<p className="text-sm text-gray-600 dark:text-gray-300">
 								还没有任何评论。
 							</p>
 						) : (
 							<ul className="space-y-4">
-								{comments.map((comment, index) => (
-									<li key={comment.id} className="border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700">
-										<div className="mb-1 flex items-center justify-between">
-											<span className="text-xs text-gray-500 dark:text-gray-400">
-												{commentStartIndex + index + 1} 楼
-											</span>
-											<span className="text-xs text-gray-500 dark:text-gray-400">
-												{new Date(comment.createdAt).toLocaleString()}
-											</span>
-										</div>
-										<div className="text-sm text-gray-800 dark:text-gray-100">
-											{comment.content}
-										</div>
-										<p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-											<span>作者：{comment.authorName}</span>
-										</p>
+								{comments.map((comment, index) => {
+									const isOwner = Boolean(data.user && data.user.id === comment.authorId);
+									const busy = Boolean(commentBusyIds[comment.id]);
+									const isEditing = editingCommentId === comment.id;
+									const shielded = Boolean(comment.isShielded);
+									return (
+										<li
+											key={comment.id}
+											className="border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700"
+										>
+											<div className="mb-1 flex items-center justify-between">
+												<span className="text-xs text-gray-500 dark:text-gray-400">
+													{commentStartIndex + index + 1} 楼
+												</span>
+												<span className="text-xs text-gray-500 dark:text-gray-400">
+													{new Date(comment.createdAt).toLocaleString()}
+												</span>
+											</div>
+											<div className="flex items-start justify-between gap-3">
+												<div className="flex-1 text-sm text-gray-800 dark:text-gray-100">
+													{shielded ? (
+														<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-100">
+															<div>该评论已被屏蔽。</div>
+															{comment.shieldReason ? <div className="mt-1">原因：{comment.shieldReason}</div> : null}
+															{comment.shieldedByName ? <div className="mt-1">操作人：{comment.shieldedByName}</div> : null}
+															{comment.shieldedAt ? (
+																<div className="mt-1">时间：{new Date(comment.shieldedAt).toLocaleString()}</div>
+															) : null}
+														</div>
+													) : isEditing ? (
+														<div className="space-y-2">
+															<textarea
+																value={editingDraft}
+																onChange={(e) => setEditingDraft(e.target.value)}
+																rows={3}
+																className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+															/>
+															<div className="flex items-center gap-2 text-xs">
+																<button
+																	type="button"
+																	onClick={() => saveEditComment(comment.id)}
+																	disabled={busy}
+																	className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+																>
+																	{busy ? "保存中..." : "保存"}
+																</button>
+																<button
+																	type="button"
+																	onClick={cancelEditComment}
+																	disabled={busy}
+																	className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+																>
+																	取消
+																</button>
+															</div>
+														</div>
+													) : (
+														<div>
+															<div className="text-sm text-gray-800 dark:text-gray-100">{comment.content}</div>
+															{comment.updatedAt ? (
+																<div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+																	已编辑于 {new Date(comment.updatedAt).toLocaleString()}
+																</div>
+															) : null}
+														</div>
+													)}
+												</div>
+												<div className="ml-3 flex flex-col items-end gap-1 text-xs">
+													<p className="text-gray-500 dark:text-gray-400">
+														<span>作者：{comment.authorName}</span>
+													</p>
+													<div className="flex flex-wrap items-center justify-end gap-2">
+														{isOwner && !isBanned && !shielded ? (
+															<>
+																<button
+																		type="button"
+																		onClick={() => startEditComment(comment.id)}
+																		disabled={busy}
+																		className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+																	>
+																		编辑
+																	</button>
+																<button
+																	type="button"
+																	onClick={() => deleteComment(comment.id)}
+																	disabled={busy}
+																	className="rounded bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-70"
+																>
+																	{busy ? "删除中..." : "删除"}
+																</button>
+															</>
+														) : null}
+														{isAdminUser ? (
+															<button
+																	type="button"
+																	onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
+																	disabled={busy}
+																	className={
+																		shielded
+																			? "rounded border border-amber-500 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-50 dark:border-amber-400 dark:text-amber-300 dark:hover:bg-amber-900/30"
+																			: "rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
+																	}
+															>
+																	{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
+																</button>
+														) : null}
+													</div>
+												</div>
+											</div>
 										{comment.attachments.length === 0 ? null : (
 											<ul className="mt-3 space-y-2">
 												{comment.attachments.map((a) => (
@@ -2390,12 +2946,13 @@ export default function PostDetailPage() {
 											</div>
 										) : null}
 									</li>
-								))}
-							</ul>
-						)}
-						<div className="mt-6 flex items-center justify-between text-sm">
-							<div className="text-gray-600 dark:text-gray-300">
-								第 {data.page} / {data.totalPages} 页
+								);
+							})}
+						</ul>
+					)}
+					<div className="mt-6 flex items-center justify-between text-sm">
+						<div className="text-gray-600 dark:text-gray-300">
+							第 {data.page} / {data.totalPages} 页
 							</div>
 							<div className="flex items-center gap-3">
 								{canPrev ? (
