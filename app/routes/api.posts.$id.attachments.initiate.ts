@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
-import { getDBFromContext, queryOne } from "~/lib/d1.server";
+import { execute, getDBFromContext, queryOne } from "~/lib/d1.server";
 import { createUploadRecord, validateAttachmentMeta, attachmentLimits } from "~/lib/attachments.server";
 
 type ActionData =
@@ -24,6 +24,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
 	const allowAnyExtension = user.role === "superadmin" || user.role === "topadmin";
+	const bypassCountLimit = user.role === "admin" || user.role === "superadmin" || user.role === "topadmin";
 	const rawId = params.id;
 	const postId = rawId ? Number(rawId) : NaN;
 	if (!rawId || Number.isNaN(postId)) {
@@ -42,6 +43,10 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "只有作者可以上传附件" }, { status: 403 });
 	}
 
+	const traceId = request.headers.get("cf-ray") || "";
+	const ip = request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || null;
+	const userAgent = request.headers.get("User-Agent") || null;
+
 	let body: any = null;
 	try {
 		body = await request.json();
@@ -57,14 +62,40 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	try {
-		const { record, mode, partSizeBytes } = await createUploadRecord({
+		const { record, mode, partSizeBytes, countLimitBypassed, existingCount, activeCount } = await createUploadRecord({
 			context,
 			postId,
 			uploaderId: user.id,
 			filename,
 			mimeType,
 			sizeBytes,
+			bypassCountLimit,
 		});
+		if (countLimitBypassed) {
+			try {
+				await execute(
+					getDBFromContext(context),
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						user.id,
+						"attachment_post_count_limit_bypassed",
+						ip,
+						userAgent,
+						JSON.stringify({
+							traceId,
+							postId,
+							uploaderId: user.id,
+							uploaderRole: user.role,
+							existingCount,
+							activeCount,
+							limit: attachmentLimits.MAX_ATTACHMENTS_PER_POST,
+						}),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+		}
 		return json<ActionData>({
 			ok: true,
 			uploadRecordId: record.id,

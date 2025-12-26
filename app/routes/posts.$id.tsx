@@ -731,7 +731,7 @@ export default function PostDetailPage() {
 	const uploadsPaused = data.attachmentStorage.paused;
 	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
 	const uploadsPausedMessage = `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
-	const maxFilesPerPost = attachmentLimits.MAX_ATTACHMENTS_PER_POST;
+	const maxFilesPerPost = isAdminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
 	const maxTotalPostBytes = attachmentLimits.MAX_TOTAL_POST_BYTES;
 	const maxFileSizeBytesForUser = attachmentLimits.MAX_FILE_SIZE_BYTES;
 
@@ -758,6 +758,7 @@ export default function PostDetailPage() {
 	const remainingSlots = useMemo(() => {
 		const existing = attachments.length;
 		const uploading = queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
+		if (maxFilesPerPost === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY;
 		return Math.max(0, maxFilesPerPost - existing - uploading);
 	}, [attachments.length, maxFilesPerPost, queue]);
 
@@ -803,6 +804,12 @@ export default function PostDetailPage() {
 		if (mb < 1024) return `${mb.toFixed(1)} MB`;
 		const gb = mb / 1024;
 		return `${gb.toFixed(2)} GB`;
+	}
+
+	function formatCount(count: number) {
+		if (count === Number.POSITIVE_INFINITY) return "不限";
+		if (!Number.isFinite(count) || count < 0) return "0";
+		return String(count);
 	}
 
 	function validateLocal(file: File) {
@@ -1760,7 +1767,7 @@ export default function PostDetailPage() {
 					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-								附件（{attachments.length} / {attachmentLimits.MAX_ATTACHMENTS_PER_POST}）
+									附件（{attachments.length} / {formatCount(maxFilesPerPost)}）
 							</h2>
 							<span className="text-xs text-gray-500 dark:text-gray-400">
 								单附件大小：{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(attachmentLimits.MAX_FILE_SIZE_BYTES)}
@@ -1872,7 +1879,7 @@ export default function PostDetailPage() {
 											上传附件
 										</label>
 										<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-										<span>剩余可上传：{remainingSlots} 个</span>
+												<span>剩余可上传：{formatCount(remainingSlots)} 个</span>
 											<span>
 												已选 {formatSize(selectionSize.selectedBytes)} / 剩余 {formatSize(selectionSize.remainingBytes)}
 											</span>
@@ -2007,7 +2014,9 @@ export default function PostDetailPage() {
 							) : null}
 						</div>
 								<div className="flex items-center justify-between">
-										<span className="text-xs text-gray-500 dark:text-gray-400">每帖最多 {maxFilesPerPost} 个附件</span>
+													<span className="text-xs text-gray-500 dark:text-gray-400">
+														{maxFilesPerPost === Number.POSITIVE_INFINITY ? "每帖附件数量不限" : `每帖最多 ${maxFilesPerPost} 个附件`}
+													</span>
 									<button
 										type="button"
 										onClick={startUpload}

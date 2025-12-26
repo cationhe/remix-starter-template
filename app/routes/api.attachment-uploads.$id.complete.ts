@@ -27,6 +27,7 @@ function parsePositiveInt(value: string | undefined) {
 }
 
 export async function action({ request, context, params }: ActionFunctionArgs) {
+	const startedAt = Date.now();
 	if (request.method.toUpperCase() !== "POST") {
 		return json<ActionData>({ ok: false, error: "不支持的请求方法" }, { status: 405 });
 	}
@@ -124,6 +125,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 					userAgent,
 					JSON.stringify({
 						traceId,
+						elapsedMs: Date.now() - startedAt,
 						uploader: user.displayName,
 						postId: record.postId,
 						r2Key: record.r2Key,
@@ -163,6 +165,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 					userAgent,
 					JSON.stringify({
 						traceId,
+						elapsedMs: Date.now() - startedAt,
 						uploader: user.displayName,
 						postId: record.postId,
 						r2Key: record.r2Key,

@@ -780,13 +780,17 @@ export async function createUploadRecord(args: {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
+	bypassCountLimit?: boolean;
 }) {
 	const now = Date.now();
 	await cleanupExpiredUploads(args.context, now);
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
 	const existing = await countAttachmentsForPost(args.context, args.postId);
 	let active = await countActiveUploadsForPost(args.context, args.postId, now);
-	if (existing + active >= MAX_ATTACHMENTS_PER_POST) {
+	const countAtStart = existing + active;
+	const bypassCountLimit = Boolean(args.bypassCountLimit);
+	const countLimitBypassed = bypassCountLimit && countAtStart >= MAX_ATTACHMENTS_PER_POST;
+	if (!bypassCountLimit && countAtStart >= MAX_ATTACHMENTS_PER_POST) {
 		if (existing < MAX_ATTACHMENTS_PER_POST && active > 0) {
 			const db = getDBFromContext(args.context);
 			const rows = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
@@ -886,6 +890,9 @@ export async function createUploadRecord(args: {
 		record,
 		mode,
 		partSizeBytes: mode === "multipart" ? PART_SIZE_BYTES : null,
+		countLimitBypassed,
+		existingCount: existing,
+		activeCount: active,
 	};
 }
 
