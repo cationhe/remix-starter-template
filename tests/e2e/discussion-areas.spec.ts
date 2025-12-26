@@ -46,6 +46,21 @@ async function getAreaRowByName(page: any, name: string) {
 	throw new Error(`找不到讨论区行：${name}`);
 }
 
+async function getAreaRowIndexByName(page: any, name: string) {
+	for (let i = 0; i < 50; i++) {
+		const idx = await page.locator("tbody tr").evaluateAll((rows: any, value: string) => {
+			for (let j = 0; j < rows.length; j++) {
+				const input = rows[j].querySelector('input[name="name"]') as HTMLInputElement | null;
+				if (input && String(input.value || "") === value) return j;
+			}
+			return -1;
+		}, name);
+		if (typeof idx === "number" && idx >= 0) return idx;
+		await page.waitForTimeout(200);
+	}
+	throw new Error(`找不到讨论区索引：${name}`);
+}
+
 async function expectAreaNameAtIndex(page: any, index: number, name: string) {
 	const row = page.locator("tbody tr").nth(index);
 	const ok = await row.locator('input[name="name"]').evaluateAll((els: any, value: string) => {
@@ -396,4 +411,129 @@ test("讨论区详情页：隐藏讨论区普通用户访问返回404", async ({
 	await registerOrLogin(page, { email, displayName: "e2e_area_user", password: "User1234" });
 	const resp = await page.goto(`/areas/${hiddenAreaId}`, { waitUntil: "domcontentloaded" });
 	expect(resp?.status()).toBe(404);
+});
+
+test("讨论区管理：topadmin 可调整讨论区顺序并写入审计日志", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const topadminEmail = "e2e_topadmin@example.com";
+	const topadminPassword = "Topadmin123";
+	const areaA = `topadmin排序A_${Date.now()}`;
+	const areaB = `topadmin排序B_${Date.now()}`;
+	const start = Date.now();
+
+	await registerOrLogin(page, { email: topadminEmail, displayName: "topadmin", password: topadminPassword });
+	await page.goto("/admin/discussion-areas", { waitUntil: "domcontentloaded" });
+	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
+
+	await page.getByPlaceholder("例如：综合讨论").fill(areaA);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, areaA);
+
+	await page.getByPlaceholder("例如：综合讨论").fill(areaB);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, areaB);
+
+	const rowA = await getAreaRowByName(page, areaA);
+	const areaAId = Number(await rowA.locator('input[name="areaId"]').inputValue());
+	const rowB = await getAreaRowByName(page, areaB);
+	const areaBId = Number(await rowB.locator('input[name="areaId"]').inputValue());
+
+	const indexABefore = await getAreaRowIndexByName(page, areaA);
+	const indexBBefore = await getAreaRowIndexByName(page, areaB);
+	await rowB.dragTo(rowA);
+	const indexAAfterDrag = await getAreaRowIndexByName(page, areaA);
+	const indexBAfterDrag = await getAreaRowIndexByName(page, areaB);
+	expect(indexABefore).not.toBe(indexAAfterDrag);
+	expect(indexBBefore).not.toBe(indexBAfterDrag);
+	expect(indexBAfterDrag).toBeLessThan(indexAAfterDrag);
+
+	await page.getByRole("button", { name: "保存排序" }).click();
+	await expect(page.getByRole("heading", { name: "保存排序" })).toBeVisible();
+	await page.locator('input[name="password"]').fill(topadminPassword);
+	await page.getByRole("button", { name: "确认执行" }).click();
+	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
+	const indexAAfterSave = await getAreaRowIndexByName(page, areaA);
+	const indexBAfterSave = await getAreaRowIndexByName(page, areaB);
+	expect(indexBAfterSave).toBeLessThan(indexAAfterSave);
+
+	const reorderLogs = await waitForAuditLog(page, {
+		eventType: "discussion_area_reordered",
+		predicate: (l) => {
+			const order = l?.metadata?.order;
+			return (
+				Number(l?.createdAt ?? 0) >= start &&
+				Array.isArray(order) &&
+				order.includes(areaAId) &&
+				order.includes(areaBId)
+			);
+		},
+	});
+	expect(
+		reorderLogs.some((l) => {
+			const order = l?.metadata?.order;
+			return (
+				Number(l?.createdAt ?? 0) >= start &&
+				Array.isArray(order) &&
+				order.includes(areaAId) &&
+				order.includes(areaBId)
+			);
+		}),
+	).toBeTruthy();
+});
+
+test("置顶：topadmin 可置顶/取消置顶并写入审计日志", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const topadminEmail = "e2e_topadmin@example.com";
+	const topadminPassword = "Topadmin123";
+	const title = `topadmin置顶_${Date.now()}`;
+	const start = Date.now();
+
+	await registerOrLogin(page, { email: topadminEmail, displayName: "topadmin", password: topadminPassword });
+	await page.goto("/posts/new", { waitUntil: "domcontentloaded" });
+	await page.locator('input[name="title"]').fill(title);
+	await page.locator('textarea[name="content"]').fill("pin as topadmin");
+	await page.getByRole("button", { name: "发布" }).click();
+	await expect(page).toHaveURL(/\/posts$/);
+
+	await page.getByRole("link", { name: title }).click();
+	await expect(page).toHaveURL(/\/posts\//);
+	await page.getByRole("button", { name: "永久置顶" }).click();
+	await expect(page.getByRole("button", { name: "取消置顶" })).toBeEnabled();
+
+	const postId = (() => {
+		const m = page.url().match(/\/posts\/(\d+)/);
+		return m ? Number(m[1]) : 0;
+	})();
+	expect(postId > 0).toBeTruthy();
+
+	const pinLogs = await waitForAuditLog(page, {
+		eventType: "post_pin_set",
+		predicate: (l) => {
+			return Number(l?.createdAt ?? 0) >= start && l?.metadata?.postId === postId && l?.metadata?.pinnedUntilMs === 0;
+		},
+	});
+	expect(
+		pinLogs.some((l) => {
+			return Number(l?.createdAt ?? 0) >= start && l?.metadata?.postId === postId && l?.metadata?.pinnedUntilMs === 0;
+		}),
+	).toBeTruthy();
+
+	await page.getByRole("button", { name: "取消置顶" }).click();
+	await expect(page.getByRole("button", { name: "永久置顶" })).toBeEnabled();
+
+	const unpinLogs = await waitForAuditLog(page, {
+		eventType: "post_pin_set",
+		predicate: (l) => {
+			return Number(l?.createdAt ?? 0) >= start && l?.metadata?.postId === postId && l?.metadata?.pinnedUntilMs === null;
+		},
+	});
+	expect(
+		unpinLogs.some((l) => {
+			return Number(l?.createdAt ?? 0) >= start && l?.metadata?.postId === postId && l?.metadata?.pinnedUntilMs === null;
+		}),
+	).toBeTruthy();
 });

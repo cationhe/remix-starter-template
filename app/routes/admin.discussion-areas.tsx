@@ -2,7 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { useEffect, useMemo, useState } from "react";
-import { assertNotBanned, getClientIp, requireUser, verifyLogin } from "~/lib/auth.server";
+import { assertNotBanned, getClientIp, isSuperadmin, requireUser, verifyLogin } from "~/lib/auth.server";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 
 type DiscussionAreaRow = {
@@ -18,6 +18,7 @@ type DiscussionAreaRow = {
 type LoaderData = {
 	me: Awaited<ReturnType<typeof requireUser>>;
 	areas: DiscussionAreaRow[];
+	canReorder: boolean;
 };
 
 type ActionData = {
@@ -78,12 +79,13 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	if (me.role !== "superadmin" && me.role !== "topadmin") {
 		throw new Response("只有超级管理员或站点管理员可访问", { status: 403 });
 	}
+	const canReorder = isSuperadmin(me);
 	const db = getDBFromContext(context);
 	const areas = await queryAll<DiscussionAreaRow>(
 		db,
 		"SELECT a.id as id, a.name as name, a.sort_order as sortOrder, a.is_hidden as isHidden, a.created_at as createdAt, a.updated_at as updatedAt, (SELECT COUNT(1) FROM posts p WHERE p.area_id = a.id) as postCount FROM discussion_areas a ORDER BY a.sort_order ASC, a.id ASC",
 	);
-	return json<LoaderData>({ me, areas });
+	return json<LoaderData>({ me, areas, canReorder });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -308,8 +310,16 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	}
 
 	if (intent === "reorderAreas") {
-		if (me.role !== "superadmin") {
-			return json<ActionData>({ formError: "只有超级管理员可调整讨论区顺序" }, { status: 403 });
+		if (!isSuperadmin(me)) {
+			await logEvent({
+				context,
+				userId: me.id,
+				eventType: "discussion_area_reorder_denied",
+				ip,
+				userAgent,
+				metadata: { role: me.role },
+			});
+			return json<ActionData>({ formError: "只有超级管理员或站点管理员可调整讨论区顺序" }, { status: 403 });
 		}
 		const password = String(formData.get("password") || "").trim();
 		if (!password) {
@@ -387,7 +397,7 @@ export default function AdminDiscussionAreasPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
-	const canReorder = data.me.role === "superadmin";
+	const canReorder = data.canReorder;
 	const initialAreas = useMemo(() => data.areas, [data.areas]);
 	const [areas, setAreas] = useState(() => initialAreas);
 	const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -553,7 +563,7 @@ export default function AdminDiscussionAreasPage() {
 						</button>
 					</div>
 					{!canReorder ? (
-						<div className="px-4 pb-3 text-xs text-gray-500 dark:text-gray-400">只有超级管理员可调整讨论区顺序</div>
+						<div className="px-4 pb-3 text-xs text-gray-500 dark:text-gray-400">只有超级管理员或站点管理员可调整讨论区顺序</div>
 					) : null}
 					<table className="w-full table-auto text-left text-sm">
 						<thead className="bg-gray-100 text-xs text-gray-600 dark:bg-gray-900/30 dark:text-gray-300">

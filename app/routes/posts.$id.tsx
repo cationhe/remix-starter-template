@@ -10,6 +10,7 @@ import {
 	consumeDailyQuota,
 	findUserById,
 	getClientIp,
+	isSuperadmin,
 	requireUser,
 	sendEmail,
 } from "~/lib/auth.server";
@@ -364,8 +365,16 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "unbanPost") {
-		if (user.role !== "superadmin" && user.role !== "topadmin") {
-			return json<ActionData>({ formError: "只有超级管理员可以解封帖子" }, { status: 403 });
+		if (!isSuperadmin(user)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_unban_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "只有超级管理员或站点管理员可以解封帖子" }, { status: 403 });
 		}
 		const postRow = await queryOne<{ isBanned: number }>(
 			db,
@@ -396,8 +405,16 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "setPin") {
-		if (user.role !== "superadmin" && user.role !== "topadmin") {
-			return json<ActionData>({ formError: "只有超级管理员可以设置置顶" }, { status: 403 });
+		if (!isSuperadmin(user)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_pin_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "只有超级管理员或站点管理员可以设置置顶" }, { status: 403 });
 		}
 		const mode = String(formData.get("mode") || "");
 		const now = Date.now();
@@ -440,8 +457,16 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "deleteBannedPost") {
-		if (user.role !== "superadmin" && user.role !== "topadmin") {
-			return json<ActionData>({ formError: "只有超级管理员可以删除封禁帖子" }, { status: 403 });
+		if (!isSuperadmin(user)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_delete_banned_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "只有超级管理员或站点管理员可以删除封禁帖子" }, { status: 403 });
 		}
 		const postRow = await queryOne<{ isBanned: number }>(
 			db,

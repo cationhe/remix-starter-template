@@ -4,6 +4,26 @@ function randomFakeIp(prefix: string) {
 	return `${prefix}.${Math.floor(Math.random() * 200) + 1}.${Math.floor(Math.random() * 200) + 1}`;
 }
 
+async function registerOrLogin(page: any, args: { email: string; displayName: string; password: string }) {
+	await page.goto("/login", { waitUntil: "domcontentloaded" });
+	await page.getByLabel("邮箱").fill(args.email);
+	await page.getByLabel("密码").fill(args.password);
+	await page.getByRole("button", { name: "登录" }).click();
+	try {
+		await expect(page).toHaveURL(/\/(|me\/password\?force=1)$/, { timeout: 8000 });
+		return;
+	} catch {
+	}
+
+	await page.goto("/register", { waitUntil: "domcontentloaded" });
+	await page.getByLabel("邮箱").fill(args.email);
+	await page.getByLabel("昵称").fill(args.displayName);
+	await page.getByLabel("密码", { exact: true }).fill(args.password);
+	await page.getByLabel("确认密码").fill(args.password);
+	await page.getByRole("button", { name: "注册" }).click();
+	await expect(page).toHaveURL(/\/$/, { timeout: 20000 });
+}
+
 test("topadmin 可修改 superadmin 账户等级并写入审计日志", async ({ page }) => {
 	await page.setExtraHTTPHeaders({
 		"CF-Connecting-IP": randomFakeIp("10"),
@@ -15,29 +35,13 @@ test("topadmin 可修改 superadmin 账户等级并写入审计日志", async ({
 	const userEmail = `u_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
 	const userPassword = "User12345";
 
-	await page.goto("/register", { waitUntil: "domcontentloaded" });
-	await page.getByLabel("邮箱").fill(topadminEmail);
-	await page.getByLabel("昵称").fill("topadmin");
-	await page.getByLabel("密码", { exact: true }).fill(topadminPassword);
-	await page.getByLabel("确认密码").fill(topadminPassword);
-	await page.getByRole("button", { name: "注册" }).click();
-	await expect(page).toHaveURL(/\/$/);
+	await registerOrLogin(page, { email: topadminEmail, displayName: "topadmin", password: topadminPassword });
 
 	await page.context().clearCookies();
-	await page.goto("/register", { waitUntil: "domcontentloaded" });
-	await page.getByLabel("邮箱").fill(userEmail);
-	await page.getByLabel("昵称").fill("user");
-	await page.getByLabel("密码", { exact: true }).fill(userPassword);
-	await page.getByLabel("确认密码").fill(userPassword);
-	await page.getByRole("button", { name: "注册" }).click();
-	await expect(page).toHaveURL(/\/$/);
+	await registerOrLogin(page, { email: userEmail, displayName: "user", password: userPassword });
 
 	await page.context().clearCookies();
-	await page.goto("/login", { waitUntil: "domcontentloaded" });
-	await page.getByLabel("邮箱").fill(topadminEmail);
-	await page.getByLabel("密码").fill(topadminPassword);
-	await page.getByRole("button", { name: "登录" }).click();
-	await expect(page).toHaveURL(/\/$/);
+	await registerOrLogin(page, { email: topadminEmail, displayName: "topadmin", password: topadminPassword });
 
 	await page.goto("/admin/users", { waitUntil: "domcontentloaded" });
 	await expect(page.getByRole("heading", { name: "用户管理" })).toBeVisible();
