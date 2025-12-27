@@ -197,16 +197,14 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const post: PostDetail = { ...postRow, updatedByName };
 
 	let accessHeaders: HeadersInit | undefined = undefined;
-	const canBypassHidden = user?.role === "topadmin" || user?.role === "superadmin" || user?.id === post.authorId;
+	const canBypassHidden = user?.role === "topadmin" || user?.id === post.authorId;
 	if (post.isHidden && !canBypassHidden) {
 		const access = await ensureHiddenPostReadable({ request, context, postId: id, isHidden: true, user });
 		accessHeaders = access.headers;
 	}
 
 	const hiddenInvites =
-		post.isHidden && (user?.role === "topadmin" || user?.role === "superadmin")
-			? await listHiddenPostInvites(context, id)
-			: null;
+		post.isHidden && user?.role === "topadmin" ? await listHiddenPostInvites(context, id) : null;
 
 	const commentCountRow = await queryOne<{ count: number | string }>(
 		db,
@@ -478,12 +476,12 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			const token = await issueHiddenPostAccessToken(context, { postId, userId: invitedUserId, issuedBy: userId, now });
 			const link = `${origin}/posts/${postId}?t=${encodeURIComponent(token.token)}`;
 			const text =
-				"【系统通知】你被邀请参与隐藏帖子讨论\n" +
+				"隐藏帖子邀请\n" +
 				`帖子：${postTitle}\n` +
 				`邀请人：${user.displayName}（ID: ${userId}）\n` +
-				`邀请时间：${new Date(now).toLocaleString()}\n` +
-				`访问链接：${link}\n\n` +
-				"注意：该链接为一次性访问令牌，请勿转发。";
+				`邀请时间：${new Date(now).toLocaleString()}\n\n` +
+				`<a href="${link}" style="color: blue; text-decoration: underline">点击查看隐藏内容</a>\n\n` +
+				`<span style="color: red; font-weight: bold">重要提醒：在不再需要访问隐藏帖子前，请勿删除本消息，否则将无法找到隐藏帖子入口！</span>`;
 			await sendMessage(context, { sender: user, recipientId: invitedUserId, content: text, isPinned: true, isImportant: true });
 		}
 

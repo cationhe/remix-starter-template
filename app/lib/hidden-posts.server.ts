@@ -150,14 +150,20 @@ async function consumeAccessToken(context: AppLoadContext, args: { postId: numbe
 		[args.postId, args.userId, tokenHash],
 	);
 	if (!row) return { ok: false as const, reason: "token_not_found" };
-	if (args.now > Number(row.expiresAt ?? 0)) return { ok: false as const, reason: "token_expired" };
-	if (row.usedAt) return { ok: false as const, reason: "token_used" };
-	const result = await execute(
-		db,
-		"UPDATE hidden_post_access_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL",
-		[args.now, row.id],
-	);
-	if (Number(result.meta?.changes ?? 0) <= 0) return { ok: false as const, reason: "token_race" };
+	// 移除过期检查和使用次数限制
+	// if (args.now > Number(row.expiresAt ?? 0)) return { ok: false as const, reason: "token_expired" };
+	// if (row.usedAt) return { ok: false as const, reason: "token_used" };
+
+	// 仅记录访问时间，不限制后续访问
+	try {
+		await execute(
+			db,
+			"UPDATE hidden_post_access_tokens SET used_at = ? WHERE id = ?",
+			[args.now, row.id],
+		);
+	} catch {
+	}
+
 	try {
 		await execute(
 			db,
@@ -197,7 +203,8 @@ export async function ensureHiddenPostReadable(args: {
 	if (!args.isHidden) {
 		return { headers: undefined as HeadersInit | undefined };
 	}
-	if (args.user?.role === "topadmin" || args.user?.role === "superadmin") {
+	// 仅允许 topadmin 直接访问所有隐藏内容
+	if (args.user?.role === "topadmin") {
 		return { headers: undefined as HeadersInit | undefined };
 	}
 	if (!args.user) {
@@ -211,6 +218,7 @@ export async function ensureHiddenPostReadable(args: {
 
 	const session = await getSession(args.request, args.context);
 	if (hasSessionAccess(session, args.postId)) {
+		// 即使已有 session，也记录访问日志（如果需要）
 		return { headers: undefined as HeadersInit | undefined };
 	}
 
@@ -224,6 +232,19 @@ export async function ensureHiddenPostReadable(args: {
 	const consumed = await consumeAccessToken(args.context, { postId: args.postId, userId: args.user.id, token, now });
 	if (!consumed.ok) {
 		throw new Response("帖子不存在", { status: 404 });
+	}
+
+	// 记录访问日志
+	try {
+		const db = getDBFromContext(args.context);
+		const ip = args.request.headers.get("CF-Connecting-IP") || args.request.headers.get("X-Forwarded-For") || "unknown";
+		const userAgent = args.request.headers.get("User-Agent") || "unknown";
+		await execute(
+			db,
+			"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			[args.user.id, "hidden_post_accessed", ip, userAgent, JSON.stringify({ postId: args.postId, method: "token" }), now],
+		);
+	} catch {
 	}
 
 	grantSessionAccess(session, args.postId, now);

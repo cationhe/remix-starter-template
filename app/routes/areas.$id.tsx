@@ -73,7 +73,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	if (userId) {
 		user = await findUserById(context, userId);
 	}
-	const canSeeHidden = user?.role === "superadmin" || user?.role === "topadmin";
+	const canSeeHidden = user?.role === "topadmin";
 
 	const db = getDBFromContext(context);
 	const area = await queryOne<AreaRow>(
