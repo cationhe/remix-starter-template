@@ -20,6 +20,11 @@ const webServerCommand = [
 	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0015_daily_post_comment_limits.sql",
 	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0016_nickname_change_requests.sql",
 	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0017_post_edits.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0018_post_images.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0019_daily_image_upload_limits.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0020_topadmin_discussion_area_permissions.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0021_comment_moderation_and_edits.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0022_attachment_download_restrictions.sql",
 	[
 		"CI=1 npx wrangler dev --port 8788 --ip 127.0.0.1 --show-interactive-dev-session=false",
 		"--var EMAIL_PROVIDER:disabled",

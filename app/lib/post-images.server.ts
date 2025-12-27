@@ -423,6 +423,58 @@ export async function deletePostImageById(context: AppLoadContext, imageId: numb
 	return { ok: true as const, deleted: true as const, r2Key: row.r2Key };
 }
 
+export async function removeAllPostImagesForPost(context: AppLoadContext, postId: number) {
+	const db = getDBFromContext(context);
+	const images = await queryAll<{ id: number; r2Key: string }>(
+		db,
+		"SELECT id as id, r2_key as r2Key FROM post_images WHERE post_id = ?",
+		[postId],
+	);
+	const uploads = await queryAll<{ id: number; r2Key: string; uploadId: string }>(
+		db,
+		"SELECT id as id, r2_key as r2Key, upload_id as uploadId FROM post_image_uploads WHERE post_id = ?",
+		[postId],
+	);
+
+	await execute(db, "DELETE FROM post_images WHERE post_id = ?", [postId]);
+	await execute(
+		db,
+		"DELETE FROM post_image_upload_parts WHERE upload_record_id IN (SELECT id FROM post_image_uploads WHERE post_id = ?)",
+		[postId],
+	);
+	await execute(db, "DELETE FROM post_image_uploads WHERE post_id = ?", [postId]);
+
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	if (!bucket) return;
+
+	const r2Keys = new Set<string>();
+	for (const i of images) {
+		if (i.r2Key) r2Keys.add(i.r2Key);
+	}
+	for (const u of uploads) {
+		if (u.r2Key) r2Keys.add(u.r2Key);
+		if (u.uploadId && u.uploadId !== "single") {
+			try {
+				const upload = bucket.resumeMultipartUpload(u.r2Key, u.uploadId);
+				await upload.abort();
+			} catch {
+			}
+		}
+	}
+
+	for (const key of r2Keys) {
+		try {
+			await bucket.delete(key);
+		} catch {
+		}
+	}
+}
+
 export async function getPostImagesStorageUsage(context: AppLoadContext, now = Date.now()) {
 	const db = getDBFromContext(context);
 	const usedRow = await queryOne<{ sum: number | string | null }>(

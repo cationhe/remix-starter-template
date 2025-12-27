@@ -14,6 +14,7 @@ export type AttachmentRecord = {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
+	isDownloadable: number;
 	createdAt: number;
 };
 
@@ -39,6 +40,7 @@ export type CommentAttachmentRecord = {
 	filename: string;
 	mimeType: string;
 	sizeBytes: number;
+	isDownloadable: number;
 	createdAt: number;
 };
 
@@ -475,7 +477,7 @@ export async function listAttachmentsByPostId(context: AppLoadContext, postId: n
 	const db = getDBFromContext(context);
 	const rows = await queryAll<AttachmentRecord>(
 		db,
-		"SELECT id as id, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, created_at as createdAt FROM attachments WHERE post_id = ? ORDER BY created_at ASC",
+		"SELECT id as id, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, is_downloadable as isDownloadable, created_at as createdAt FROM attachments WHERE post_id = ? ORDER BY created_at ASC",
 		[postId],
 	);
 	return rows;
@@ -488,7 +490,7 @@ export async function listCommentAttachmentsByCommentIds(context: AppLoadContext
 	const placeholders = ids.map(() => "?").join(",");
 	const rows = await queryAll<CommentAttachmentRecord>(
 		db,
-		`SELECT id as id, comment_id as commentId, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, created_at as createdAt FROM comment_attachments WHERE comment_id IN (${placeholders}) ORDER BY created_at ASC`,
+		`SELECT id as id, comment_id as commentId, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, is_downloadable as isDownloadable, created_at as createdAt FROM comment_attachments WHERE comment_id IN (${placeholders}) ORDER BY created_at ASC`,
 		ids,
 	);
 	return rows;
@@ -498,7 +500,7 @@ export async function getCommentAttachmentById(context: AppLoadContext, attachme
 	const db = getDBFromContext(context);
 	const row = await queryOne<CommentAttachmentRecord>(
 		db,
-		"SELECT id as id, comment_id as commentId, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, created_at as createdAt FROM comment_attachments WHERE id = ?",
+		"SELECT id as id, comment_id as commentId, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, is_downloadable as isDownloadable, created_at as createdAt FROM comment_attachments WHERE id = ?",
 		[attachmentId],
 	);
 	return row;
@@ -772,7 +774,7 @@ export async function getAttachmentById(context: AppLoadContext, attachmentId: n
 	const db = getDBFromContext(context);
 	const row = await queryOne<AttachmentRecord>(
 		db,
-		"SELECT id as id, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, created_at as createdAt FROM attachments WHERE id = ?",
+		"SELECT id as id, post_id as postId, uploader_id as uploaderId, r2_key as r2Key, filename as filename, mime_type as mimeType, size_bytes as sizeBytes, is_downloadable as isDownloadable, created_at as createdAt FROM attachments WHERE id = ?",
 		[attachmentId],
 	);
 	return row;

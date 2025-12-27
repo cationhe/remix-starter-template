@@ -28,6 +28,7 @@ import { formatTotalStorageLimit } from "~/lib/attachment-storage";
 import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachments.server";
 import { splitPostContentParts } from "~/lib/post-content";
 import { sendMessage } from "~/lib/messages.server";
+import { removeAllPostImagesForPost } from "~/lib/post-images.server";
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 10,
@@ -338,6 +339,11 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			[now, userId, reason, postId],
 		);
 		try {
+			await execute(db, "UPDATE attachments SET is_downloadable = 0 WHERE post_id = ?", [postId]);
+			await execute(db, "UPDATE comment_attachments SET is_downloadable = 0 WHERE post_id = ?", [postId]);
+		} catch {
+		}
+		try {
 			await execute(
 				db,
 				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -411,11 +417,16 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			return json<ActionData>({ formError: "帖子未封禁" }, { status: 400 });
 		}
 		const now = Date.now();
-			await execute(
-				db,
-				"UPDATE posts SET is_banned = 0, banned_at = NULL, banned_by = NULL, banned_reason = NULL WHERE id = ? AND deleted_at IS NULL",
-				[postId],
-			);
+		await execute(
+			db,
+			"UPDATE posts SET is_banned = 0, banned_at = NULL, banned_by = NULL, banned_reason = NULL WHERE id = ? AND deleted_at IS NULL",
+			[postId],
+		);
+		try {
+			await execute(db, "UPDATE attachments SET is_downloadable = 1 WHERE post_id = ?", [postId]);
+			await execute(db, "UPDATE comment_attachments SET is_downloadable = 1 WHERE post_id = ?", [postId]);
+		} catch {
+		}
 		try {
 			await execute(
 				db,
@@ -505,6 +516,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		try {
 			await removeAllAttachmentsForPost(context, postId);
 			await removeAllCommentAttachmentsForPost(context, postId);
+			await removeAllPostImagesForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
@@ -537,6 +549,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		try {
 			await removeAllAttachmentsForPost(context, postId);
 			await removeAllCommentAttachmentsForPost(context, postId);
+			await removeAllPostImagesForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
@@ -1020,7 +1033,6 @@ export default function PostDetailPage() {
 	}
 	const isSubmitting = navigation.state === "submitting";
 	const isBanned = Boolean(data.user?.isBanned);
-	const postBanned = Boolean(data.post.isBanned);
 	const postPinned =
 		data.post.pinnedUntilMs === 0 ||
 		(typeof data.post.pinnedUntilMs === "number" && data.post.pinnedUntilMs > Date.now());
@@ -1035,11 +1047,7 @@ export default function PostDetailPage() {
 	const canEditPost = Boolean(
 		data.user && (data.user.id === data.post.authorId || data.user.role === "superadmin" || data.user.role === "topadmin"),
 	);
-	const canManageAttachments = Boolean(isAuthor && !isBanned);
-	const uploadsPaused = data.attachmentStorage.paused;
-	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
 	const contentParts = useMemo(() => splitPostContentParts(data.post.content), [data.post.content]);
-	const uploadsPausedMessage = `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
 	const maxFilesPerPost = isAdminUser ? Number.POSITIVE_INFINITY : attachmentLimits.MAX_ATTACHMENTS_PER_POST;
 	const maxTotalPostBytes = attachmentLimits.MAX_TOTAL_POST_BYTES;
 	const maxFileSizeBytesForUser = attachmentLimits.MAX_FILE_SIZE_BYTES;
@@ -1065,9 +1073,28 @@ export default function PostDetailPage() {
 	const [queue, setQueue] = useState<UploadItem[]>([]);
 	const [busy, setBusy] = useState(false);
 	const [globalError, setGlobalError] = useState<string | null>(null);
+	const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
+	const [postBannedState, setPostBannedState] = useState(() => Boolean(data.post.isBanned));
+	const [postBannedReason, setPostBannedReason] = useState<string | null>(() => data.post.bannedReason ?? null);
+	const [postBannedAt, setPostBannedAt] = useState<number | null>(() => (data.post.bannedAt ? Number(data.post.bannedAt) : null));
+	const [postBannedByName, setPostBannedByName] = useState<string | null>(() => (data.post.bannedBy ? data.post.authorName : null));
+	const [postModerationBusy, setPostModerationBusy] = useState(false);
 	const [isDragging, setIsDragging] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const queueRef = useRef<UploadItem[]>([]);
+	const postBanned = postBannedState;
+	const canManageAttachments = Boolean(isAuthor && !isBanned);
+	const uploadsPaused = data.attachmentStorage.paused || postBanned;
+	const canUpload = Boolean(canManageAttachments && !uploadsPaused);
+	const uploadsPausedMessage = postBanned
+		? "该帖子已被封禁，已禁止附件上传"
+		: `网站总存储量已达到上限（${formatTotalStorageLimit(data.attachmentStorage.limitBytes)}），已暂停附件上传`;
+
+	useEffect(() => {
+		if (!globalSuccess) return;
+		const id = window.setTimeout(() => setGlobalSuccess(null), 2000);
+		return () => window.clearTimeout(id);
+	}, [globalSuccess]);
 
 	const remainingSlots = useMemo(() => {
 		const existing = attachments.length;
@@ -1174,6 +1201,71 @@ export default function PostDetailPage() {
 			}
 		}
 		throw lastError instanceof Error ? lastError : new Error("网络错误");
+	}
+
+	async function banPostWithUi(form: HTMLFormElement) {
+		if (!isAdminUser) return;
+		if (postModerationBusy) return;
+		setGlobalError(null);
+		setGlobalSuccess(null);
+		setPostModerationBusy(true);
+		try {
+			const body = new FormData(form);
+			body.set("intent", "banPost");
+			const res = await fetchWithRetry(
+				`${window.location.pathname}${window.location.search}`,
+				{ method: "POST", headers: { Accept: "application/json" }, body },
+				{ timeoutMs: 15_000, retries: 2 },
+			);
+			const data = (await res.json()) as any;
+			if (!res.ok) {
+				throw new Error(String(data?.formError || data?.error || "屏蔽失败"));
+			}
+			setPostBannedState(true);
+			setPostBannedReason(String(body.get("reason") || "") || null);
+			setPostBannedAt(Date.now());
+			setPostBannedByName(data?.bannedByName ? String(data.bannedByName) : null);
+			setGlobalSuccess("屏蔽成功");
+			try {
+				const input = form.querySelector('input[name="reason"]') as HTMLInputElement | null;
+				if (input) input.value = "";
+			} catch {
+			}
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "屏蔽失败");
+		} finally {
+			setPostModerationBusy(false);
+		}
+	}
+
+	async function unbanPostWithUi() {
+		if (!isSuperadminUser) return;
+		if (postModerationBusy) return;
+		setGlobalError(null);
+		setGlobalSuccess(null);
+		setPostModerationBusy(true);
+		try {
+			const body = new FormData();
+			body.set("intent", "unbanPost");
+			const res = await fetchWithRetry(
+				`${window.location.pathname}${window.location.search}`,
+				{ method: "POST", headers: { Accept: "application/json" }, body },
+				{ timeoutMs: 15_000, retries: 2 },
+			);
+			const data = (await res.json()) as any;
+			if (!res.ok) {
+				throw new Error(String(data?.formError || data?.error || "解除屏蔽失败"));
+			}
+			setPostBannedState(false);
+			setPostBannedReason(null);
+			setPostBannedAt(null);
+			setPostBannedByName(null);
+			setGlobalSuccess("解除屏蔽成功");
+		} catch (e) {
+			setGlobalError(e instanceof Error ? e.message : "解除屏蔽失败");
+		} finally {
+			setPostModerationBusy(false);
+		}
 	}
 
 	async function fetchJsonWithRetry<T>(
@@ -1509,6 +1601,7 @@ export default function PostDetailPage() {
 	}
 
 	async function requestDownload(attachmentId: number) {
+		if (postBanned || isBanned) return;
 		setGlobalError(null);
 		try {
 			const { res, data } = await fetchJsonWithRetry<any>(
@@ -1527,6 +1620,7 @@ export default function PostDetailPage() {
 	}
 
 	async function requestCommentDownload(commentAttachmentId: number) {
+		if (postBanned || isBanned) return;
 		setGlobalError(null);
 		try {
 			const { res, data } = await fetchJsonWithRetry<any>(
@@ -1750,6 +1844,10 @@ export default function PostDetailPage() {
 	async function startCommentUpload(commentId: number, existingAttachments: CommentAttachmentRecord[]) {
 		const current = commentUploads[commentId] || { selectedFiles: [], queue: [], busy: false, error: null };
 		if (current.busy) return;
+		if (postBanned) {
+			updateCommentUploads(commentId, (c) => ({ ...c, error: "该帖子已被封禁，已禁止评论附件上传" }));
+			return;
+		}
 		const maxFilesPerComment = attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
 		const maxTotalCommentBytes = attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
 		const uploadingCount = current.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
@@ -2340,23 +2438,27 @@ export default function PostDetailPage() {
 													<button
 														type="button"
 														onClick={() => requestDownload(a.id)}
-														disabled={isBanned}
+														disabled={isBanned || postBanned || !a.isDownloadable}
 													className={
-														isBanned
+														isBanned || postBanned || !a.isDownloadable
 															? "cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
 															: "rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
 													}
 												>
-													下载
+													{postBanned || !a.isDownloadable ? "已禁止下载" : "下载"}
 												</button>
-												) : (
-													<a
-														href="/login"
-														className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
-													>
-														登录后下载
-													</a>
-												)}
+											) : postBanned || !a.isDownloadable ? (
+												<span className="cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+													已禁止下载
+												</span>
+											) : (
+												<a
+													href="/login"
+													className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+												>
+													登录后下载
+												</a>
+											)}
 												{canManageAttachments ? (
 													<button
 														type="button"
@@ -2727,20 +2829,20 @@ export default function PostDetailPage() {
 																</div>
 															</div>
 														</div>
-														{data.user ? (
-															<div className="flex items-center gap-2">
-																<button
-																	type="button"
-																	onClick={() => requestCommentDownload(a.id)}
-																	disabled={isBanned}
-																	className={
-																		isBanned
-																			? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-																			: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
-																	}
-																>
-																	下载
-																</button>
+													{data.user ? (
+														<div className="flex items-center gap-2">
+															<button
+																type="button"
+																onClick={() => requestCommentDownload(a.id)}
+															disabled={isBanned || postBanned || !a.isDownloadable}
+															className={
+															isBanned || postBanned || !a.isDownloadable
+																? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+																: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+														}
+														>
+															{postBanned || !a.isDownloadable ? "已禁止下载" : "下载"}
+														</button>
 																{data.user.id === comment.authorId && !isBanned ? (
 																	<button
 																		type="button"
@@ -2752,14 +2854,18 @@ export default function PostDetailPage() {
 																</button>
 															) : null}
 														</div>
-													) : (
-														<a
-															href="/login"
-															className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
-														>
-															登录后下载
-														</a>
-													)}
+												) : postBanned || !a.isDownloadable ? (
+													<span className="cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+														已禁止下载
+													</span>
+												) : (
+													<a
+														href="/login"
+														className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+													>
+														登录后下载
+												</a>
+											)}
 												</li>
 											))}
 										</ul>
@@ -2821,19 +2927,24 @@ export default function PostDetailPage() {
 													<button
 														type="button"
 														onClick={() => startCommentUpload(comment.id, comment.attachments)}
-														disabled={Boolean(commentUploads[comment.id]?.busy)}
+														disabled={Boolean(commentUploads[comment.id]?.busy) || postBanned}
 														className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-70"
 													>
-														{commentUploads[comment.id]?.busy ? "上传中..." : "开始上传"}
+														{postBanned ? "已封禁" : commentUploads[comment.id]?.busy ? "上传中..." : "开始上传"}
 													</button>
 												</div>
-													<div className="mt-2 flex items-center justify-between gap-3">
-								<input
-									type="file"
-									multiple
-									disabled={Boolean(commentUploads[comment.id]?.busy)}
-									onChange={(e) => {
-										const files = Array.from(e.target.files || []);
+												{postBanned ? (
+													<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+														该帖子已被封禁，已禁止评论附件上传
+													</div>
+												) : null}
+												<div className="mt-2 flex items-center justify-between gap-3">
+													<input
+														type="file"
+														multiple
+														disabled={Boolean(commentUploads[comment.id]?.busy) || postBanned}
+														onChange={(e) => {
+															const files = Array.from(e.target.files || []);
 										const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
 										if (hasTooSmall) {
 											updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: [], error: "上传文件大小不能小于10字节" }));

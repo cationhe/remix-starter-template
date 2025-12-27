@@ -1,5 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { getDBFromContext, queryOne } from "~/lib/d1.server";
 import {
 	formatContentDisposition,
 	getAttachmentById,
@@ -38,6 +39,21 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	if (!record) {
 		throw new Response("附件不存在", { status: 404 });
 	}
+	if (!record.isDownloadable) {
+		throw new Response("该附件已被禁止下载", { status: 403 });
+	}
+	const db = getDBFromContext(context);
+	const post = await queryOne<{ isBanned: number }>(
+		db,
+		"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
+		[record.postId],
+	);
+	if (!post) {
+		throw new Response("帖子不存在", { status: 404 });
+	}
+	if (post.isBanned) {
+		throw new Response("该帖子已被封禁，禁止下载附件", { status: 403 });
+	}
 
 	const bucket = getAttachmentsBucket(context);
 	const object = await bucket.get(record.r2Key);
@@ -58,4 +74,3 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	return new Response(object.body, { status: 200, headers });
 }
-

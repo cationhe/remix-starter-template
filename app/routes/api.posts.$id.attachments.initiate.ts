@@ -31,13 +31,16 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "无效的帖子ID" }, { status: 400 });
 	}
 	const db = getDBFromContext(context);
-	const post = await queryOne<{ authorId: number }>(
+	const post = await queryOne<{ authorId: number; isBanned: number }>(
 		db,
-		"SELECT author_id as authorId FROM posts WHERE id = ? AND deleted_at IS NULL",
+		"SELECT author_id as authorId, is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
 		[postId],
 	);
 	if (!post) {
 		return json<ActionData>({ ok: false, error: "帖子不存在" }, { status: 404 });
+	}
+	if (post.isBanned) {
+		return json<ActionData>({ ok: false, error: "该帖子已被封禁，禁止上传附件" }, { status: 403 });
 	}
 	if (post.authorId !== user.id) {
 		return json<ActionData>({ ok: false, error: "只有作者可以上传附件" }, { status: 403 });

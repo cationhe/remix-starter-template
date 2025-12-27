@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
-import { execute, getDBFromContext } from "~/lib/d1.server";
+import { execute, getDBFromContext, queryOne } from "~/lib/d1.server";
 import {
 	finalizeUploadToAttachment,
 	containsEicarBytes,
@@ -43,6 +43,17 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const record = await getUploadRecord(context, uploadRecordId);
 	if (!record) {
 		return json<ActionData>({ ok: false, error: "上传任务不存在" }, { status: 404 });
+	}
+	const post = await queryOne<{ isBanned: number }>(
+		getDBFromContext(context),
+		"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
+		[record.postId],
+	);
+	if (!post) {
+		return json<ActionData>({ ok: false, error: "帖子不存在" }, { status: 404 });
+	}
+	if (post.isBanned) {
+		return json<ActionData>({ ok: false, error: "该帖子已被封禁，禁止上传附件" }, { status: 403 });
 	}
 	if (record.uploaderId !== user.id) {
 		return json<ActionData>({ ok: false, error: "无权操作该上传任务" }, { status: 403 });

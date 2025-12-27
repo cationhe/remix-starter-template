@@ -1,6 +1,7 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
+import { getDBFromContext, queryOne } from "~/lib/d1.server";
 import { getUploadRecord, listUploadedParts } from "~/lib/attachments.server";
 
 type LoaderData =
@@ -22,6 +23,17 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const record = await getUploadRecord(context, uploadRecordId);
 	if (!record) {
 		return json<LoaderData>({ ok: false, error: "上传任务不存在" }, { status: 404 });
+	}
+	const post = await queryOne<{ isBanned: number }>(
+		getDBFromContext(context),
+		"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
+		[record.postId],
+	);
+	if (!post) {
+		return json<LoaderData>({ ok: false, error: "帖子不存在" }, { status: 404 });
+	}
+	if (post.isBanned) {
+		return json<LoaderData>({ ok: false, error: "该帖子已被封禁，禁止上传附件" }, { status: 403 });
 	}
 	if (record.uploaderId !== user.id) {
 		return json<LoaderData>({ ok: false, error: "无权访问该上传任务" }, { status: 403 });

@@ -40,6 +40,17 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	if (!comment) {
 		return json<ActionData>({ ok: false, error: "评论不存在" }, { status: 404 });
 	}
+	const post = await queryOne<{ isBanned: number }>(
+		db,
+		"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
+		[comment.postId],
+	);
+	if (!post) {
+		return json<ActionData>({ ok: false, error: "帖子不存在" }, { status: 404 });
+	}
+	if (post.isBanned) {
+		return json<ActionData>({ ok: false, error: "该帖子已被封禁，禁止上传附件" }, { status: 403 });
+	}
 	if (comment.authorId !== user.id) {
 		return json<ActionData>({ ok: false, error: "只有评论作者可以上传附件" }, { status: 403 });
 	}
