@@ -172,16 +172,22 @@ export default function App() {
 												>
 													昵称审批
 												</Link>
-											<Link
-												to="/admin/discussion-areas"
+												<Link
+													to="/admin/discussion-areas"
 										className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-										>
+									>
 											讨论区管理
 										</Link>
+										<Link
+											to="/admin/storage"
+											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+										>
+											存储容量
+										</Link>
 											</>
-										) : null}
-									</>
-								) : null}
+									) : null}
+								</>
+							) : null}
 								<Link
 									to="/logout"
 									className="rounded bg-gray-800 px-3 py-1 text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"

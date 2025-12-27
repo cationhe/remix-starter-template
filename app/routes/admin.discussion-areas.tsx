@@ -10,6 +10,9 @@ import {
 	type DiscussionPermissions,
 } from "~/lib/discussion-permissions.server";
 
+const ROLE_KEYS = ["user", "admin", "superadmin", "topadmin"] as const;
+type RoleKey = (typeof ROLE_KEYS)[number];
+
 type DiscussionAreaRow = {
 	id: number;
 	name: string;
@@ -638,6 +641,7 @@ export default function AdminDiscussionAreasPage() {
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
 	const canReorder = data.canReorder;
+	const permission = data.permission;
 	const initialAreas = useMemo(() => data.areas, [data.areas]);
 	const [areas, setAreas] = useState(() => initialAreas);
 	const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -648,6 +652,16 @@ export default function AdminDiscussionAreasPage() {
 	const [dialogHidden, setDialogHidden] = useState<0 | 1>(0);
 	const [verifyPassword, setVerifyPassword] = useState("");
 	const [dialogSubmitting, setDialogSubmitting] = useState(false);
+	const [bulkAreaIds, setBulkAreaIds] = useState("");
+	const [bulkRole, setBulkRole] = useState<RoleKey>("user");
+	const [bulkInherit, setBulkInherit] = useState<"1" | "0">("1");
+	const [bulkCanView, setBulkCanView] = useState<"inherit" | "allow" | "deny">("inherit");
+	const [bulkCanPost, setBulkCanPost] = useState<"inherit" | "allow" | "deny">("inherit");
+	const [bulkCanComment, setBulkCanComment] = useState<"inherit" | "allow" | "deny">("inherit");
+	const [bulkCanDownloadAttachments, setBulkCanDownloadAttachments] = useState<"inherit" | "allow" | "deny">(
+		"inherit",
+	);
+	const [bulkPassword, setBulkPassword] = useState("");
 
 	useEffect(() => {
 		setAreas(initialAreas);
@@ -726,6 +740,34 @@ export default function AdminDiscussionAreasPage() {
 		return a !== b;
 	}, [areas, initialAreas]);
 	const previewAreas = useMemo(() => areas.filter((a) => !a.isHidden), [areas]);
+
+	function formatEff(p: DiscussionPermissions) {
+		const v = p.canView ? "允" : "禁";
+		const post = p.canPost ? "允" : "禁";
+		const c = p.canComment ? "允" : "禁";
+		const d = p.canDownloadAttachments ? "允" : "禁";
+		return `看:${v} 发:${post} 评:${c} 下:${d}`;
+	}
+
+	function getEff(role: RoleKey, areaId: number): DiscussionPermissions {
+		const row = permission.matrix[role]?.[areaId];
+		return (
+			row?.effective ??
+			({ canView: true, canPost: true, canComment: true, canDownloadAttachments: true } satisfies DiscussionPermissions)
+		);
+	}
+
+	function appendAreaId(nextId: number) {
+		setBulkAreaIds((prev) => {
+			const existing = prev
+				.split(/[，,\s]+/)
+				.map((s) => Number(String(s).trim()))
+				.filter((n) => Number.isFinite(n) && n > 0)
+				.map((n) => Math.floor(n));
+			const next = Array.from(new Set([...existing, nextId]));
+			return next.join(",");
+		});
+	}
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -910,7 +952,215 @@ export default function AdminDiscussionAreasPage() {
 						})}
 					</tbody>
 				</table>
-			</div>
+				</div>
+
+				<div className="rounded-xl bg-white p-4 shadow dark:bg-gray-800">
+					<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+						<div>
+							<div className="text-sm font-medium text-gray-900 dark:text-gray-100">用户组权限</div>
+							<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+								对各讨论区的 user/admin/superadmin/topadmin 设置可见/发帖/评论/下载权限。
+							</div>
+						</div>
+						<Link
+							to="/admin/users"
+							className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+						>
+							返回用户管理
+						</Link>
+					</div>
+
+					{!permission.ready ? (
+						<div className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+							权限系统未就绪（可能尚未应用相关数据库迁移），当前仅展示讨论区列表。
+						</div>
+					) : (
+						<div className="mt-4 flex flex-col gap-4">
+							<div className="overflow-x-auto rounded border border-gray-200 dark:border-gray-700">
+								<table className="min-w-full table-auto text-left text-sm">
+									<thead className="bg-gray-50 text-xs text-gray-600 dark:bg-gray-900/30 dark:text-gray-300">
+										<tr>
+											<th className="px-3 py-2">讨论区</th>
+											{ROLE_KEYS.map((role) => (
+												<th key={role} className="px-3 py-2">
+													{role}
+												</th>
+											))}
+										</tr>
+									</thead>
+									<tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+										{areas.map((a) => (
+											<tr key={a.id} className="text-gray-900 dark:text-gray-100">
+												<td className="px-3 py-2">
+													<div className="font-medium">
+														{a.name}（ID {a.id}）
+													</div>
+													<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+														{a.isHidden ? "隐藏" : "公开"}
+													</div>
+												</td>
+												{ROLE_KEYS.map((role) => (
+													<td key={role} className="px-3 py-2 text-xs text-gray-700 dark:text-gray-200">
+														{formatEff(getEff(role, a.id))}
+													</td>
+												))}
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+
+							<div className="rounded border border-gray-200 p-3 dark:border-gray-700">
+								<div className="text-sm font-medium text-gray-900 dark:text-gray-100">批量设置权限</div>
+								<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+									在下方选择讨论区并设置目标用户组的权限，保存需要二次验证密码。
+								</div>
+
+								<div className="mt-3 flex flex-wrap gap-2">
+									{areas.map((a) => (
+										<button
+											key={a.id}
+											type="button"
+											onClick={() => appendAreaId(a.id)}
+											className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+										>
+											{a.name}（{a.id}）
+										</button>
+									))}
+									<button
+										type="button"
+										onClick={() => setBulkAreaIds("")}
+										className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									>
+										清空选择
+									</button>
+								</div>
+
+								<Form method="post" className="mt-4 grid gap-3">
+									<input type="hidden" name="intent" value="bulkSetPermissions" />
+									<div className="grid gap-3 sm:grid-cols-2">
+										<div>
+											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">用户组</label>
+											<select
+												name="role"
+												value={bulkRole}
+												onChange={(e) => setBulkRole(e.target.value as RoleKey)}
+												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											>
+												{ROLE_KEYS.map((r) => (
+													<option key={r} value={r}>
+														{r}
+													</option>
+												))}
+											</select>
+										</div>
+										<div>
+											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">继承</label>
+											<select
+												name="inherit"
+												value={bulkInherit}
+												onChange={(e) => setBulkInherit(e.target.value === "0" ? "0" : "1")}
+												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											>
+												<option value="1">开启继承</option>
+												<option value="0">关闭继承</option>
+											</select>
+										</div>
+									</div>
+
+									<div>
+										<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">讨论区ID</label>
+										<textarea
+											name="areaIds"
+											value={bulkAreaIds}
+											onChange={(e) => setBulkAreaIds(e.target.value)}
+											placeholder="例如：1,2,3"
+											rows={2}
+											className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+										/>
+									</div>
+
+									<div className="grid gap-3 sm:grid-cols-2">
+										<div>
+											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">可见</label>
+											<select
+												name="canView"
+												value={bulkCanView}
+												onChange={(e) => setBulkCanView(e.target.value as any)}
+												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											>
+												<option value="inherit">继承</option>
+												<option value="allow">允许</option>
+												<option value="deny">禁止</option>
+											</select>
+										</div>
+										<div>
+											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">发帖</label>
+											<select
+												name="canPost"
+												value={bulkCanPost}
+												onChange={(e) => setBulkCanPost(e.target.value as any)}
+												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											>
+												<option value="inherit">继承</option>
+												<option value="allow">允许</option>
+												<option value="deny">禁止</option>
+											</select>
+										</div>
+										<div>
+											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">评论</label>
+											<select
+												name="canComment"
+												value={bulkCanComment}
+												onChange={(e) => setBulkCanComment(e.target.value as any)}
+												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											>
+												<option value="inherit">继承</option>
+												<option value="allow">允许</option>
+												<option value="deny">禁止</option>
+											</select>
+										</div>
+										<div>
+											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">下载附件</label>
+											<select
+												name="canDownloadAttachments"
+												value={bulkCanDownloadAttachments}
+												onChange={(e) => setBulkCanDownloadAttachments(e.target.value as any)}
+												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											>
+												<option value="inherit">继承</option>
+												<option value="allow">允许</option>
+												<option value="deny">禁止</option>
+											</select>
+										</div>
+									</div>
+
+									<div>
+										<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">二次验证密码</label>
+										<input
+											type="password"
+											name="password"
+											value={bulkPassword}
+											onChange={(e) => setBulkPassword(e.target.value)}
+											placeholder="请输入你的账号密码"
+											className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+										/>
+									</div>
+
+									<div className="flex items-center justify-end">
+										<button
+											type="submit"
+											disabled={navigation.state !== "idle"}
+											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+										>
+											{navigation.state === "idle" ? "保存权限" : "保存中..."}
+										</button>
+									</div>
+								</Form>
+							</div>
+						</div>
+					)}
+				</div>
 
 				<div className="rounded-xl bg-white p-4 shadow dark:bg-gray-800">
 					<div className="flex items-center justify-between">
