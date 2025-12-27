@@ -381,6 +381,41 @@ test("讨论区详情页：可从讨论区名称进入，支持分页与搜索",
 	await expect(page).toHaveURL(/\/posts\//);
 });
 
+test("讨论区详情页：发帖入口锁定讨论区", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const superadminEmail = "7103308@qq.com";
+	const superadminPassword = "Admin123";
+	const areaName = `锁定发帖区_${Date.now()}`;
+	const title = `锁定发帖_${Date.now()}`;
+
+	await registerOrLogin(page, { email: superadminEmail, displayName: "superadmin", password: superadminPassword });
+	await page.goto("/admin/discussion-areas", { waitUntil: "domcontentloaded" });
+	await page.getByPlaceholder("例如：综合讨论").fill(areaName);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, areaName);
+	const row = await getAreaRowByName(page, areaName);
+	const areaId = Number(await row.locator('input[name="areaId"]').inputValue());
+	expect(areaId > 0).toBeTruthy();
+
+	await page.goto("/posts", { waitUntil: "domcontentloaded" });
+	await page.getByRole("link", { name: areaName }).click();
+	await expect(page).toHaveURL(new RegExp(`/areas/${areaId}(\\?.*)?$`));
+	await expect(page.getByRole("heading", { name: areaName })).toBeVisible();
+
+	await page.getByRole("link", { name: "发帖" }).click();
+	await expect(page).toHaveURL(new RegExp(`/posts/new\\?areaId=${areaId}`));
+	await expect(page.locator('select[name="areaId"]')).toHaveCount(0);
+	await expect(page.locator(`input[disabled][value="${areaName}"]`)).toBeVisible();
+
+	await page.locator('input[name="title"]').fill(title);
+	await page.locator('textarea[name="content"]').fill("locked");
+	await page.getByRole("button", { name: "发布" }).click();
+	await expect(page).toHaveURL(new RegExp(`/areas/${areaId}(\\?.*)?$`));
+	await expect(page.getByRole("link", { name: title })).toBeVisible();
+});
+
 test("讨论区详情页：隐藏讨论区普通用户访问返回404", async ({ page }) => {
 	test.setTimeout(180000);
 	page.setDefaultNavigationTimeout(120000);

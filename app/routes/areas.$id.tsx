@@ -4,7 +4,7 @@ import { Form, Link, isRouteErrorResponse, useLoaderData, useLocation, useNaviga
 import { findUserById, getClientIp } from "~/lib/auth.server";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
-import { canViewDiscussionArea, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
+import { canPostInDiscussionArea, canViewDiscussionArea, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
 
 type AreaRow = {
 	id: number;
@@ -26,6 +26,7 @@ type LoaderData = {
 	user: Awaited<ReturnType<typeof findUserById>>;
 	area: AreaRow;
 	posts: PostListItem[];
+	canPost: boolean;
 	q: string;
 	page: number;
 	pageSize: number;
@@ -112,6 +113,14 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 				}
 				throw new Response("讨论区不存在", { status: 404 });
 			}
+		}
+	}
+
+	let canPost = Boolean(user) && !Boolean(user?.isBanned);
+	if (user) {
+		const permissionReady = await isDiscussionPermissionsReady(context);
+		if (permissionReady) {
+			canPost = canPost && (await canPostInDiscussionArea(context, areaId, user.role));
 		}
 	}
 
@@ -242,6 +251,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		user,
 		area,
 		posts,
+		canPost,
 		q,
 		page,
 		pageSize,
@@ -280,9 +290,27 @@ export default function AreaPostsPage() {
 							</div>
 							<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">共 {data.totalCount} 帖，按时间倒序</div>
 						</div>
-						<Link to="/posts" className="text-sm text-blue-600 hover:underline dark:text-blue-400">
-							返回讨论区列表
-						</Link>
+						<div className="flex flex-col items-end gap-2">
+							{data.user ? (
+								data.canPost ? (
+									<Link
+										to={`/posts/new?areaId=${data.area.id}`}
+										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+									>
+										发帖
+									</Link>
+								) : (
+									<span className="text-xs text-gray-500 dark:text-gray-400">当前讨论区不可发帖</span>
+								)
+							) : (
+								<Link to={`/posts/new?areaId=${data.area.id}`} className="text-sm text-blue-600 hover:underline dark:text-blue-400">
+									登录后发帖
+								</Link>
+							)}
+							<Link to="/posts" className="text-sm text-blue-600 hover:underline dark:text-blue-400">
+								返回讨论区列表
+							</Link>
+						</div>
 					</div>
 					<Form method="get" className="flex flex-col gap-2 sm:flex-row sm:items-center">
 						<input

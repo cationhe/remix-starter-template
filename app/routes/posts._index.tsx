@@ -174,12 +174,32 @@ export default function PostsIndex() {
 						在这里可以查看论坛中的帖子。
 					</p>
 					{data.user && !isBanned ? (
-						<Link
-							to="/posts/new"
-							className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
-						>
-							发新帖
-						</Link>
+						<form action="/posts/new" method="get" className="flex flex-wrap items-center justify-end gap-2">
+							<label htmlFor="newPostAreaId" className="text-sm text-gray-600 dark:text-gray-300">
+								选择讨论区
+							</label>
+							<select
+								id="newPostAreaId"
+								name="areaId"
+								required
+								defaultValue={data.areas[0]?.id ?? ""}
+								disabled={data.areas.length === 0}
+								className="rounded border border-gray-300 bg-white px-3 py-1 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+							>
+								{data.areas.map((a) => (
+									<option key={a.id} value={a.id}>
+										{a.name}
+									</option>
+								))}
+							</select>
+							<button
+								type="submit"
+								disabled={data.areas.length === 0}
+								className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+							>
+								发新帖
+							</button>
+						</form>
 					) : (
 						<span className="text-xs text-gray-500 dark:text-gray-400">
 							{data.user ? "封禁账号不可发帖" : "登录后可以发帖"}
@@ -196,14 +216,25 @@ export default function PostsIndex() {
 							<section key={area.id} className="overflow-hidden rounded-xl bg-white shadow dark:bg-gray-800">
 								<div className="flex items-center justify-between px-6 py-4">
 									<div className="flex items-center gap-2">
-										<h2 className="text-base font-semibold">
-											<Link
-												to={`/areas/${area.id}`}
-												className="text-blue-700 hover:underline dark:text-blue-400"
-											>
-												{area.name}
-											</Link>
-										</h2>
+										<h2
+											className="text-lg font-bold"
+											style={{
+												fontFamily: '"Songti SC", "SimSun", "STSong", serif',
+												fontWeight: 700,
+												fontSize: "1.125rem",
+												color: "#7c2d12",
+												backgroundColor: "#e0f2fe",
+												padding: "2px 8px",
+												borderRadius: "8px",
+											}}
+										>
+												<Link
+													to={`/areas/${area.id}`}
+													className="text-blue-700 hover:underline dark:text-blue-400"
+												>
+													{area.name}
+												</Link>
+											</h2>
 										{area.isHidden ? (
 											<span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-100">
 												隐藏

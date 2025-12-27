@@ -14,6 +14,7 @@ type AreaListItem = {
 type LoaderData = {
 	me: { id: number; role: string };
 	areas: AreaListItem[];
+	lockedAreaId: number | null;
 };
 
 type ActionData = {
@@ -35,6 +36,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	assertNotBanned(user);
 	const db = getDBFromContext(context);
 	const canSeeHidden = user.role === "superadmin" || user.role === "topadmin";
+	const url = new URL(request.url);
+	const lockedRaw = String(url.searchParams.get("areaId") ?? "").trim();
+	const lockedAreaIdNum = (() => {
+		if (!lockedRaw) return null;
+		const n = Number(lockedRaw);
+		if (!Number.isFinite(n) || n <= 0) return null;
+		return Math.floor(n);
+	})();
 	let areas = await queryAll<AreaListItem>(
 		db,
 		canSeeHidden
@@ -44,18 +53,35 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	const permissionReady = await isDiscussionPermissionsReady(context);
 	if (permissionReady) {
 		const permMap = await getEffectiveDiscussionPermissionsForAreas(context, areas.map((a) => a.id), user.role);
-		areas = areas.filter((a) => permMap[a.id]?.canView && permMap[a.id]?.canPost);
+		areas = areas.filter((a) => permMap[a.id]?.canView);
 	}
-	return json<LoaderData>({ me: { id: user.id, role: user.role }, areas });
+	if (lockedAreaIdNum) {
+		const target = areas.find((a) => a.id === lockedAreaIdNum) ?? null;
+		if (!target) {
+			throw new Response("讨论区不存在", { status: 404 });
+		}
+		areas = [target];
+		return json<LoaderData>({ me: { id: user.id, role: user.role }, areas, lockedAreaId: target.id });
+	}
+	return json<LoaderData>({ me: { id: user.id, role: user.role }, areas, lockedAreaId: null });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
 	const user = await requireUser(request, context);
 	assertNotBanned(user);
+	const url = new URL(request.url);
+	const lockedRaw = String(url.searchParams.get("areaId") ?? "").trim();
+	const lockedAreaIdNum = (() => {
+		if (!lockedRaw) return null;
+		const n = Number(lockedRaw);
+		if (!Number.isFinite(n) || n <= 0) return null;
+		return Math.floor(n);
+	})();
 	const formData = await request.formData();
 	const title = String(formData.get("title") || "");
 	const content = String(formData.get("content") || "");
-	const areaIdRaw = String(formData.get("areaId") || "").trim();
+	const areaIdRawFromForm = String(formData.get("areaId") || "").trim();
+	const areaIdRaw = lockedAreaIdNum ? String(lockedAreaIdNum) : areaIdRawFromForm;
 	const trimmedTitle = title.trim();
 	const trimmedContent = content.trim();
 	const wantsHiddenPost = String(formData.get("isHiddenPost") || "").trim() === "1";
@@ -136,6 +162,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				[trimmedTitle, trimmedContent, user.id, createdAt, area.id],
 			);
 		}
+		if (lockedAreaIdNum) {
+			return redirect(`/areas/${area.id}`);
+		}
 		return redirect("/posts");
 	} catch (error) {
 		return json<ActionData>({ fields, formError: "发帖失败，请稍后重试" }, { status: 500 });
@@ -150,6 +179,7 @@ export default function NewPost() {
 	const hasAreas = loaderData.areas.length > 0;
 	const fallbackAreaId = hasAreas ? String(loaderData.areas[0].id) : "";
 	const selectedAreaId = actionData?.fields?.areaId && actionData.fields.areaId !== "" ? actionData.fields.areaId : fallbackAreaId;
+	const lockedArea = loaderData.lockedAreaId ? loaderData.areas.find((a) => a.id === loaderData.lockedAreaId) ?? null : null;
 	const canCreateHidden = loaderData.me.role === "topadmin";
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -162,21 +192,33 @@ export default function NewPost() {
 						<label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">
 							讨论区
 						</label>
-						<select
-							name="areaId"
-							required
-							defaultValue={selectedAreaId}
-							className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-						>
-							<option value="" disabled>
-								请选择讨论区
-							</option>
-							{loaderData.areas.map((a) => (
-								<option key={a.id} value={a.id}>
-									{a.name}{a.isHidden ? "（隐藏）" : ""}
+						{lockedArea ? (
+							<div className="space-y-2">
+								<input type="hidden" name="areaId" value={lockedArea.id} />
+								<input
+									value={lockedArea.name}
+									disabled
+									className="w-full rounded border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900/40 dark:text-gray-100"
+								/>
+								<p className="text-xs text-gray-500 dark:text-gray-400">已锁定为当前讨论区，不能切换。</p>
+							</div>
+						) : (
+							<select
+								name="areaId"
+								required
+								defaultValue={selectedAreaId}
+								className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+							>
+								<option value="" disabled>
+									请选择讨论区
 								</option>
-							))}
-						</select>
+								{loaderData.areas.map((a) => (
+									<option key={a.id} value={a.id}>
+										{a.name}{a.isHidden ? "（隐藏）" : ""}
+									</option>
+								))}
+							</select>
+						)}
 						{!hasAreas ? (
 							<p className="mt-1 text-xs text-red-600">暂无可发帖的讨论区，请联系管理员。</p>
 						) : null}
