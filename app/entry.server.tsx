@@ -49,6 +49,15 @@ export default async function handleRequest(
 	}
 
 	responseHeaders.set("Content-Type", "text/html");
+	if (!responseHeaders.has("Cache-Control")) {
+		responseHeaders.set("Cache-Control", "no-store");
+	}
+	const vary = responseHeaders.get("Vary");
+	if (!vary) {
+		responseHeaders.set("Vary", "Cookie");
+	} else if (!vary.split(",").some((v) => v.trim().toLowerCase() === "cookie")) {
+		responseHeaders.set("Vary", `${vary}, Cookie`);
+	}
 	return new Response(body, {
 		headers: responseHeaders,
 		status: responseStatusCode,

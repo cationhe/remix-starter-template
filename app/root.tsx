@@ -42,7 +42,15 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 			throw redirect("/me/password?force=1");
 		}
 	}
-	return json<LoaderData>({ user });
+	return json<LoaderData>(
+		{ user },
+		{
+			headers: {
+				"Cache-Control": "no-store",
+				Vary: "Cookie",
+			},
+		},
+	);
 }
 
 export function Layout({ children }: { children: React.ReactNode }) {
