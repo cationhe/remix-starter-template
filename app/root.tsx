@@ -166,18 +166,18 @@ export default function App() {
 											</Link>
 											{user.role === "superadmin" || user.role === "topadmin" ? (
 												<>
-													<Link
-														to="/admin/posts/bulk-delete"
-														className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-													>
-														批量删封禁帖
-													</Link>
-													<Link
-														to="/admin/nickname-requests"
-														className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-													>
-														昵称审批
-													</Link>
+												<Link
+													to="/admin/posts/bulk-delete"
+													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+												>
+													批量删除封禁
+												</Link>
+												<Link
+													to="/admin/nickname-requests"
+													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+												>
+													昵称审批
+												</Link>
 											<Link
 												to="/admin/discussion-areas"
 										className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"

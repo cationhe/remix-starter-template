@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, Link, Outlet, useActionData, useLoaderData, useLocation, useNavigation } from "@remix-run/react";
+import { Form, Link, Outlet, useActionData, useLoaderData, useLocation, useNavigation, useRevalidator } from "@remix-run/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
@@ -919,7 +919,17 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			} catch {
 			}
 		}
-		if (wantsJson) return json({ ok: true, commentId, shieldedAt: now, shieldedBy: userId, shieldedByName: user.displayName, shieldReason: reason });
+		if (wantsJson)
+			return json({
+				ok: true,
+				commentId,
+				postId,
+				commentAuthorId: row.authorId,
+				shieldedAt: now,
+				shieldedBy: userId,
+				shieldedByName: user.displayName,
+				shieldReason: reason,
+			});
 		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
 	}
 
@@ -1026,6 +1036,7 @@ export default function PostDetailPage() {
 	const data = useLoaderData<typeof loader>();
 	const actionData = useActionData<ActionData>();
 	const navigation = useNavigation();
+	const revalidator = useRevalidator();
 	const location = useLocation();
 	const isEditRoute = /\/edit\/?$/.test(location.pathname);
 	if (isEditRoute) {
@@ -1080,6 +1091,7 @@ export default function PostDetailPage() {
 	const [postBannedByName, setPostBannedByName] = useState<string | null>(() => (data.post.bannedBy ? data.post.authorName : null));
 	const [postModerationBusy, setPostModerationBusy] = useState(false);
 	const [isDragging, setIsDragging] = useState(false);
+	const lastPollAtRef = useRef(0);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const queueRef = useRef<UploadItem[]>([]);
 	const postBanned = postBannedState;
@@ -1095,6 +1107,36 @@ export default function PostDetailPage() {
 		const id = window.setTimeout(() => setGlobalSuccess(null), 2000);
 		return () => window.clearTimeout(id);
 	}, [globalSuccess]);
+
+	useEffect(() => {
+		if (!isAdminUser) return;
+		let active = true;
+		const tick = () => {
+			if (!active) return;
+			if (document.visibilityState !== "visible") return;
+			if (revalidator.state !== "idle") return;
+			const now = Date.now();
+			if (now - lastPollAtRef.current < 5000) return;
+			lastPollAtRef.current = now;
+			revalidator.revalidate();
+		};
+		const id = window.setInterval(tick, 8000);
+		window.addEventListener("focus", tick);
+		const onVisibility = () => tick();
+		document.addEventListener("visibilitychange", onVisibility);
+		function onStorage(e: StorageEvent) {
+			if (e.key !== "moderationLastShieldedComment") return;
+			tick();
+		}
+		window.addEventListener("storage", onStorage);
+		return () => {
+			active = false;
+			window.clearInterval(id);
+			window.removeEventListener("focus", tick);
+			document.removeEventListener("visibilitychange", onVisibility);
+			window.removeEventListener("storage", onStorage);
+		};
+	}, [isAdminUser, revalidator]);
 
 	const remainingSlots = useMemo(() => {
 		const existing = attachments.length;
@@ -1543,6 +1585,14 @@ export default function PostDetailPage() {
 						: c,
 				),
 			);
+			try {
+				localStorage.setItem(
+					"moderationLastShieldedComment",
+					JSON.stringify({ commentId, postId: data?.postId ?? data.post.id, ts: Date.now() }),
+				);
+			} catch {
+			}
+			setGlobalSuccess("评论已屏蔽，已加入待处理队列");
 		} catch (e) {
 			setGlobalError(e instanceof Error ? e.message : "屏蔽失败");
 		} finally {
@@ -2119,6 +2169,11 @@ export default function PostDetailPage() {
 					</div>
 				</header>
 				<main className="flex flex-col gap-6">
+					{globalSuccess ? (
+						<div className="fixed right-4 top-4 z-50 max-w-[90vw] rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 shadow dark:border-green-900/40 dark:bg-green-900/20 dark:text-green-200">
+							{globalSuccess}
+						</div>
+					) : null}
 					{postBanned ? (
 						<div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
 							<div className="font-medium">该帖子已被封禁，禁止跟帖回复</div>
@@ -2700,12 +2755,24 @@ export default function PostDetailPage() {
 									return (
 										<li
 											key={comment.id}
-											className="border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700"
+											className={
+												shielded
+													? "rounded border border-red-200 bg-red-50/60 p-3 dark:border-red-900/40 dark:bg-red-900/10"
+												: "border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700"
+											}
 										>
 											<div className="mb-1 flex items-center justify-between">
 												<span className="text-xs text-gray-500 dark:text-gray-400">
 													{commentStartIndex + index + 1} 楼
 												</span>
+												{shielded ? (
+													<span className="inline-flex items-center gap-1 rounded bg-red-600 px-2 py-0.5 text-[11px] font-medium text-white">
+														<svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5" aria-hidden="true">
+															<path d="M12 2c3 0 6 1.2 8 3.2V12c0 5-3.4 9.3-8 10.7C7.4 21.3 4 17 4 12V5.2C6 3.2 9 2 12 2Zm0 2c-2.1 0-4.2.8-6 2.3V12c0 3.9 2.5 7.4 6 8.6 3.5-1.2 6-4.7 6-8.6V6.3C16.2 4.8 14.1 4 12 4Z" />
+													</svg>
+														已屏蔽
+													</span>
+												) : null}
 												<span className="text-xs text-gray-500 dark:text-gray-400">
 													{new Date(comment.createdAt).toLocaleString()}
 												</span>
@@ -2713,8 +2780,13 @@ export default function PostDetailPage() {
 											<div className="flex items-start justify-between gap-3">
 												<div className="flex-1 text-sm text-gray-800 dark:text-gray-100">
 													{shielded ? (
-														<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-100">
-															<div>该评论已被屏蔽。</div>
+														<div className="rounded border border-red-200 bg-white p-3 text-xs text-red-800 dark:border-red-900/40 dark:bg-gray-900/30 dark:text-red-200">
+															<div className="flex items-center gap-2 font-medium">
+																<svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+																<path d="M12 2c3 0 6 1.2 8 3.2V12c0 5-3.4 9.3-8 10.7C7.4 21.3 4 17 4 12V5.2C6 3.2 9 2 12 2Zm0 2c-2.1 0-4.2.8-6 2.3V12c0 3.9 2.5 7.4 6 8.6 3.5-1.2 6-4.7 6-8.6V6.3C16.2 4.8 14.1 4 12 4Z" />
+															</svg>
+																已屏蔽
+															</div>
 															{comment.shieldReason ? <div className="mt-1">原因：{comment.shieldReason}</div> : null}
 															{comment.shieldedByName ? <div className="mt-1">操作人：{comment.shieldedByName}</div> : null}
 															{comment.shieldedAt ? (
@@ -2786,17 +2858,17 @@ export default function PostDetailPage() {
 														) : null}
 														{isAdminUser ? (
 															<button
-																	type="button"
-																	onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
-																	disabled={busy}
-																	className={
-																		shielded
-																			? "rounded border border-amber-500 px-2 py-1 text-[11px] text-amber-700 hover:bg-amber-50 dark:border-amber-400 dark:text-amber-300 dark:hover:bg-amber-900/30"
-																			: "rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
-																	}
+																type="button"
+																onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
+																disabled={busy || (shielded && !isSuperadminUser)}
+																className={
+																	shielded
+																		? "rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
+																		: "rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
+																}
 															>
-																	{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
-																</button>
+																{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
+															</button>
 														) : null}
 													</div>
 												</div>
