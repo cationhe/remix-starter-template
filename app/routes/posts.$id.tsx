@@ -37,6 +37,7 @@ import {
 	listHiddenPostInvites,
 	isUserInvitedToHiddenPost,
 } from "~/lib/hidden-posts.server";
+import { canCommentInDiscussionArea, canViewDiscussionArea, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 10,
@@ -53,6 +54,7 @@ type PostDetail = {
 	id: number;
 	title: string;
 	content: string;
+	areaId: number;
 	createdAt: number;
 	updatedAt: number | null;
 	updatedBy: number | null;
@@ -159,13 +161,13 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const db = getDBFromContext(context);
 	let postRow: PostDetailRow | null = null;
 	const sqlFull =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.area_id as areaId, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const sqlNoUpdatedBy =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.area_id as areaId, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const sqlNoHidden =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.area_id as areaId, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const sqlNoUpdatedNoHidden =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.area_id as areaId, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const candidates = [sqlFull, sqlNoUpdatedBy, sqlNoHidden, sqlNoUpdatedNoHidden];
 	let lastError: unknown = null;
 	for (const sql of candidates) {
@@ -198,6 +200,25 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		updatedByName = row?.displayName ?? null;
 	}
 	const post: PostDetail = { ...postRow, authorRole: (postRow.authorRole as UserRole) ?? "user", updatedByName };
+	if (user) {
+		const permissionReady = await isDiscussionPermissionsReady(context);
+		if (permissionReady) {
+			const ok = await canViewDiscussionArea(context, post.areaId, user.role);
+			if (!ok) {
+				const ip = getClientIp(request);
+				const userAgent = request.headers.get("User-Agent");
+				try {
+					await execute(
+						db,
+						"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						[user.id, "discussion_area_view_denied", ip, userAgent, JSON.stringify({ areaId: post.areaId, postId: post.id, role: user.role }), Date.now()],
+					);
+				} catch {
+				}
+				throw new Response("帖子不存在", { status: 404 });
+			}
+		}
+	}
 
 	let accessHeaders: HeadersInit | undefined = undefined;
 	const canBypassHidden = user?.role === "topadmin" || user?.id === post.authorId;
@@ -351,19 +372,19 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const ip = getClientIp(request);
 	const userAgent = request.headers.get("User-Agent");
 
-	let postAccess: { authorId: number; isHidden: number } | null = null;
+	let postAccess: { authorId: number; isHidden: number; areaId: number } | null = null;
 	try {
-		postAccess = await queryOne<{ authorId: number; isHidden: number }>(
+		postAccess = await queryOne<{ authorId: number; isHidden: number; areaId: number }>(
 			db,
-			"SELECT author_id as authorId, is_hidden as isHidden FROM posts WHERE id = ? AND deleted_at IS NULL",
+			"SELECT author_id as authorId, is_hidden as isHidden, area_id as areaId FROM posts WHERE id = ? AND deleted_at IS NULL",
 			[postId],
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
 		if (message.includes("no such column") && message.includes("is_hidden")) {
-			postAccess = await queryOne<{ authorId: number; isHidden: number }>(
+			postAccess = await queryOne<{ authorId: number; isHidden: number; areaId: number }>(
 				db,
-				"SELECT author_id as authorId, 0 as isHidden FROM posts WHERE id = ? AND deleted_at IS NULL",
+				"SELECT author_id as authorId, 0 as isHidden, area_id as areaId FROM posts WHERE id = ? AND deleted_at IS NULL",
 				[postId],
 			);
 		} else {
@@ -379,6 +400,21 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		const invited = await isUserInvitedToHiddenPost(context, postId, userId);
 		if (!invited) {
 			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+	}
+	const permissionReady = await isDiscussionPermissionsReady(context);
+	if (permissionReady) {
+		const ok = await canViewDiscussionArea(context, postAccess.areaId, user.role);
+		if (!ok) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "discussion_area_view_denied", ip, userAgent, JSON.stringify({ areaId: postAccess.areaId, postId, intent }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "权限不足" }, { status: 403 });
 		}
 	}
 
@@ -1330,6 +1366,20 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 
 	if (intent !== "comment") {
 		return json<ActionData>({ formError: "未知操作" }, { status: 400 });
+	}
+	if (permissionReady) {
+		const ok = await canCommentInDiscussionArea(context, postAccess.areaId, user.role);
+		if (!ok) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "discussion_area_comment_denied", ip, userAgent, JSON.stringify({ areaId: postAccess.areaId, postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "当前讨论区禁止评论" }, { status: 403 });
+		}
 	}
 
 	const postState = await queryOne<{ isBanned: number }>(

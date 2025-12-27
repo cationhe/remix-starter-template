@@ -1,9 +1,10 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
 import { Form, Link, isRouteErrorResponse, useLoaderData, useLocation, useNavigation, useRouteError } from "@remix-run/react";
-import { findUserById } from "~/lib/auth.server";
-import { getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
+import { findUserById, getClientIp } from "~/lib/auth.server";
+import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
+import { canViewDiscussionArea, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
 
 type AreaRow = {
 	id: number;
@@ -73,7 +74,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	if (userId) {
 		user = await findUserById(context, userId);
 	}
-	const canSeeHidden = user?.role === "topadmin";
+	const canSeeHidden = user?.role === "superadmin" || user?.role === "topadmin";
 
 	const db = getDBFromContext(context);
 	const area = await queryOne<AreaRow>(
@@ -86,6 +87,32 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	}
 	if (area.isHidden && !canSeeHidden) {
 		throw new Response("讨论区不存在", { status: 404 });
+	}
+	if (user) {
+		const permissionReady = await isDiscussionPermissionsReady(context);
+		if (permissionReady) {
+			const ok = await canViewDiscussionArea(context, areaId, user.role);
+			if (!ok) {
+				const ip = getClientIp(request);
+				const userAgent = request.headers.get("User-Agent");
+				try {
+					await execute(
+						getDBFromContext(context),
+						"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						[
+							user.id,
+							"discussion_area_view_denied",
+							ip,
+							userAgent,
+							JSON.stringify({ areaId, role: user.role, path: new URL(request.url).pathname }),
+							Date.now(),
+						],
+					);
+				} catch {
+				}
+				throw new Response("讨论区不存在", { status: 404 });
+			}
+		}
 	}
 
 	const url = new URL(request.url);

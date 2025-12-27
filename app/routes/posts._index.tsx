@@ -4,6 +4,7 @@ import { Link, useLoaderData } from "@remix-run/react";
 import { getDBFromContext, queryAll } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
 import { findUserById } from "~/lib/auth.server";
+import { getEffectiveDiscussionPermissionsForAreas, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
 
 type PostListItem = {
 	id: number;
@@ -45,6 +46,15 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		db,
 		"SELECT id as id, name as name, sort_order as sortOrder, is_hidden as isHidden FROM discussion_areas ORDER BY sort_order ASC, id ASC",
 	);
+	const baseVisibleAreas = areas.filter((a) => canSeeHidden || !a.isHidden);
+	let allowedAreaIds = new Set<number>(baseVisibleAreas.map((a) => a.id));
+	if (user) {
+		const permissionReady = await isDiscussionPermissionsReady(context);
+		if (permissionReady) {
+			const permMap = await getEffectiveDiscussionPermissionsForAreas(context, baseVisibleAreas.map((a) => a.id), user.role);
+			allowedAreaIds = new Set<number>(baseVisibleAreas.filter((a) => permMap[a.id]?.canView).map((a) => a.id));
+		}
+	}
 	let topPosts: (PostListItem & { rn: number })[] = [];
 	try {
 		topPosts = await queryAll<PostListItem & { rn: number }>(
@@ -105,6 +115,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	}
 	const byArea = new Map<number, PostListItem[]>();
 	for (const row of topPosts) {
+		if (!allowedAreaIds.has(row.areaId)) continue;
 		const list = byArea.get(row.areaId) ?? [];
 		list.push({
 			id: row.id,
@@ -117,7 +128,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		});
 		byArea.set(row.areaId, list);
 	}
-	const visibleAreas = areas.filter((a) => canSeeHidden || !a.isHidden);
+	const visibleAreas = baseVisibleAreas.filter((a) => allowedAreaIds.has(a.id));
 	const merged: AreaWithPosts[] = visibleAreas.map((a) => ({
 		...a,
 		posts: byArea.get(a.id) ?? [],

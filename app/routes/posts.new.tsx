@@ -2,7 +2,8 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
-import { assertNotBanned, consumeDailyQuota, requireUser } from "~/lib/auth.server";
+import { assertNotBanned, consumeDailyQuota, getClientIp, requireUser } from "~/lib/auth.server";
+import { canPostInDiscussionArea, getEffectiveDiscussionPermissionsForAreas, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
 
 type AreaListItem = {
 	id: number;
@@ -34,12 +35,17 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	assertNotBanned(user);
 	const db = getDBFromContext(context);
 	const canSeeHidden = user.role === "superadmin" || user.role === "topadmin";
-	const areas = await queryAll<AreaListItem>(
+	let areas = await queryAll<AreaListItem>(
 		db,
 		canSeeHidden
 			? "SELECT id as id, name as name, is_hidden as isHidden FROM discussion_areas ORDER BY sort_order ASC, id ASC"
 			: "SELECT id as id, name as name, is_hidden as isHidden FROM discussion_areas WHERE is_hidden = 0 ORDER BY sort_order ASC, id ASC",
 	);
+	const permissionReady = await isDiscussionPermissionsReady(context);
+	if (permissionReady) {
+		const permMap = await getEffectiveDiscussionPermissionsForAreas(context, areas.map((a) => a.id), user.role);
+		areas = areas.filter((a) => permMap[a.id]?.canView && permMap[a.id]?.canPost);
+	}
 	return json<LoaderData>({ me: { id: user.id, role: user.role }, areas });
 }
 
@@ -87,6 +93,30 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		}
 		if (area.isHidden && user.role !== "superadmin" && user.role !== "topadmin") {
 			return json<ActionData>({ fields, formError: "该讨论区已隐藏，无法发帖" }, { status: 403 });
+		}
+		const permissionReady = await isDiscussionPermissionsReady(context);
+		if (permissionReady) {
+			const ok = await canPostInDiscussionArea(context, area.id, user.role);
+			if (!ok) {
+				const ip = getClientIp(request);
+				const userAgent = request.headers.get("User-Agent");
+				try {
+					await execute(
+						db,
+						"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						[
+							user.id,
+							"discussion_area_post_denied",
+							ip,
+							userAgent,
+							JSON.stringify({ areaId: area.id, role: user.role, title: trimmedTitle }),
+							Date.now(),
+						],
+					);
+				} catch {
+				}
+				return json<ActionData>({ fields, formError: "当前讨论区禁止发帖" }, { status: 403 });
+			}
 		}
 		const quota = await consumeDailyQuota({ context, request, user, kind: "post" });
 		if (!quota.ok) {

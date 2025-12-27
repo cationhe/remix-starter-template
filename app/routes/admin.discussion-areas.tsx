@@ -2,8 +2,13 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { useEffect, useMemo, useState } from "react";
-import { assertNotBanned, getClientIp, isSuperadmin, requireUser, verifyLogin } from "~/lib/auth.server";
+import { assertNotBanned, getClientIp, isSuperadmin, requireUser, verifyLogin, type UserRole } from "~/lib/auth.server";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
+import {
+	getEffectiveDiscussionPermissionsForAreas,
+	isDiscussionPermissionsReady,
+	type DiscussionPermissions,
+} from "~/lib/discussion-permissions.server";
 
 type DiscussionAreaRow = {
 	id: number;
@@ -19,10 +24,38 @@ type LoaderData = {
 	me: Awaited<ReturnType<typeof requireUser>>;
 	areas: DiscussionAreaRow[];
 	canReorder: boolean;
+	permission: {
+		ready: boolean;
+		matrix: {
+			user: Record<number, PermissionEditRow>;
+			admin: Record<number, PermissionEditRow>;
+			superadmin: Record<number, PermissionEditRow>;
+			topadmin: Record<number, PermissionEditRow>;
+		};
+	};
 };
 
 type ActionData = {
 	formError?: string;
+};
+
+type PermissionEditRow = {
+	inherit: number;
+	canView: number | null;
+	canPost: number | null;
+	canComment: number | null;
+	canDownloadAttachments: number | null;
+	effective: DiscussionPermissions;
+};
+
+type PermissionRow = {
+	areaId: number;
+	role: string;
+	inherit: number;
+	canView: number | null;
+	canPost: number | null;
+	canComment: number | null;
+	canDownloadAttachments: number | null;
 };
 
 function parseId(value: FormDataEntryValue | null) {
@@ -85,7 +118,83 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		db,
 		"SELECT a.id as id, a.name as name, a.sort_order as sortOrder, a.is_hidden as isHidden, a.created_at as createdAt, a.updated_at as updatedAt, (SELECT COUNT(1) FROM posts p WHERE p.area_id = a.id) as postCount FROM discussion_areas a ORDER BY a.sort_order ASC, a.id ASC",
 	);
-	return json<LoaderData>({ me, areas, canReorder });
+
+	const areaIds = areas.map((a) => a.id);
+	const permissionReady = await isDiscussionPermissionsReady(context);
+	if (!permissionReady) {
+		return json<LoaderData>({
+			me,
+			areas,
+			canReorder,
+			permission: {
+				ready: false,
+				matrix: { user: {}, admin: {}, superadmin: {}, topadmin: {} },
+			},
+		});
+	}
+
+	let permissionRows: PermissionRow[] = [];
+	try {
+		permissionRows = await queryAll<PermissionRow>(
+			db,
+			"SELECT area_id as areaId, role as role, inherit as inherit, can_view as canView, can_post as canPost, can_comment as canComment, can_download_attachments as canDownloadAttachments FROM discussion_area_role_permissions",
+		);
+	} catch {
+		return json<LoaderData>({
+			me,
+			areas,
+			canReorder,
+			permission: {
+				ready: false,
+				matrix: { user: {}, admin: {}, superadmin: {}, topadmin: {} },
+			},
+		});
+	}
+	const key = (role: UserRole, areaId: number) => `${role}:${areaId}`;
+	const rowByKey = new Map<string, PermissionRow>();
+	for (const r of permissionRows) {
+		const role = String(r.role);
+		if (role !== "user" && role !== "admin" && role !== "superadmin" && role !== "topadmin") continue;
+		rowByKey.set(key(role as UserRole, r.areaId), r);
+	}
+
+	const [userEff, adminEff, superEff, topEff] = await Promise.all([
+		getEffectiveDiscussionPermissionsForAreas(context, areaIds, "user"),
+		getEffectiveDiscussionPermissionsForAreas(context, areaIds, "admin"),
+		getEffectiveDiscussionPermissionsForAreas(context, areaIds, "superadmin"),
+		getEffectiveDiscussionPermissionsForAreas(context, areaIds, "topadmin"),
+	]);
+
+	const buildRoleMap = (role: UserRole, eff: Record<number, DiscussionPermissions>) => {
+		const out: Record<number, PermissionEditRow> = {};
+		for (const areaId of areaIds) {
+			const r = rowByKey.get(key(role, areaId));
+			out[areaId] = {
+				inherit: r ? Number(r.inherit ?? 1) : 1,
+				canView: r ? (r.canView ?? null) : null,
+				canPost: r ? (r.canPost ?? null) : null,
+				canComment: r ? (r.canComment ?? null) : null,
+				canDownloadAttachments: r ? (r.canDownloadAttachments ?? null) : null,
+				effective: eff[areaId] ?? { canView: true, canPost: true, canComment: true, canDownloadAttachments: true },
+			};
+		}
+		return out;
+	};
+
+	return json<LoaderData>({
+		me,
+		areas,
+		canReorder,
+		permission: {
+			ready: true,
+			matrix: {
+				user: buildRoleMap("user", userEff),
+				admin: buildRoleMap("admin", adminEff),
+				superadmin: buildRoleMap("superadmin", superEff),
+				topadmin: buildRoleMap("topadmin", topEff),
+			},
+		},
+	});
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -100,6 +209,20 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const db = getDBFromContext(context);
 	const ip = getClientIp(request);
 	const userAgent = request.headers.get("User-Agent");
+
+	function normalizeRole(value: FormDataEntryValue | null): UserRole | null {
+		const raw = typeof value === "string" ? value : "";
+		if (raw === "user" || raw === "admin" || raw === "superadmin" || raw === "topadmin") return raw;
+		return null;
+	}
+
+	function normalizePermValue(value: FormDataEntryValue | null): number | null {
+		const raw = typeof value === "string" ? value.trim() : "";
+		if (raw === "inherit") return null;
+		if (raw === "allow" || raw === "1") return 1;
+		if (raw === "deny" || raw === "0") return 0;
+		return null;
+	}
 
 	if (intent === "createArea") {
 		const name = normalizeName(formData.get("name"));
@@ -130,6 +253,44 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				userAgent,
 				metadata: { areaId: createdAreaId, name, sortOrder: nextSort },
 			});
+			if (createdAreaId) {
+				try {
+					const roles: UserRole[] = ["user", "admin", "superadmin", "topadmin"];
+					for (const role of roles) {
+						if (role === "user") {
+							await execute(
+								db,
+								"INSERT OR IGNORE INTO discussion_area_role_permissions (area_id, role, inherit, can_view, can_post, can_comment, can_download_attachments, updated_at, updated_by) VALUES (?, ?, 0, 1, 1, 1, 1, ?, ?)",
+								[createdAreaId, role, now, me.id],
+							);
+						} else {
+							await execute(
+								db,
+								"INSERT OR IGNORE INTO discussion_area_role_permissions (area_id, role, inherit, can_view, can_post, can_comment, can_download_attachments, updated_at, updated_by) VALUES (?, ?, 1, NULL, NULL, NULL, NULL, ?, ?)",
+								[createdAreaId, role, now, me.id],
+							);
+						}
+					}
+					await logEvent({
+						context,
+						userId: me.id,
+						eventType: "discussion_area_permissions_initialized",
+						ip,
+						userAgent,
+						metadata: { areaId: createdAreaId },
+					});
+				} catch (error) {
+					const message = error instanceof Error ? error.message : "";
+					await logEvent({
+						context,
+						userId: me.id,
+						eventType: "discussion_area_permissions_init_failed",
+						ip,
+						userAgent,
+						metadata: { areaId: createdAreaId, message },
+					});
+				}
+			}
 			return redirect("/admin/discussion-areas");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "";
@@ -151,6 +312,85 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				return json<ActionData>({ formError: "数据库未升级：请先应用最新迁移" }, { status: 500 });
 			}
 			return json<ActionData>({ formError: "创建失败，请稍后重试" }, { status: 500 });
+		}
+	}
+
+	if (intent === "bulkSetPermissions") {
+		const role = normalizeRole(formData.get("role"));
+		if (!role) {
+			return json<ActionData>({ formError: "无效的用户组" }, { status: 400 });
+		}
+		const rawAreaIds = String(formData.get("areaIds") || "").trim();
+		const parsedAreaIds = rawAreaIds
+			.split(/[，,\s]+/)
+			.map((s) => Number(String(s).trim()))
+			.filter((n) => Number.isFinite(n) && n > 0)
+			.map((n) => Math.floor(n));
+		const areaIds = Array.from(new Set(parsedAreaIds));
+		if (areaIds.length === 0) {
+			return json<ActionData>({ formError: "请至少选择一个讨论区" }, { status: 400 });
+		}
+		if (areaIds.length > 200) {
+			return json<ActionData>({ formError: "一次最多批量设置 200 个讨论区" }, { status: 400 });
+		}
+		const inheritRaw = String(formData.get("inherit") || "1").trim();
+		const inherit = inheritRaw === "0" ? 0 : 1;
+		const canView = normalizePermValue(formData.get("canView"));
+		const canPost = normalizePermValue(formData.get("canPost"));
+		const canComment = normalizePermValue(formData.get("canComment"));
+		const canDownloadAttachments = normalizePermValue(formData.get("canDownloadAttachments"));
+		if (!inherit && (canView === null || canPost === null || canComment === null || canDownloadAttachments === null)) {
+			return json<ActionData>({ formError: "关闭继承时，所有权限必须明确指定允许或禁止" }, { status: 400 });
+		}
+		const password = String(formData.get("password") || "").trim();
+		if (!password) {
+			return json<ActionData>({ formError: "需要二次验证密码" }, { status: 400 });
+		}
+		const verified = await verifyLogin(context, me.email, password);
+		if (!verified || verified.id !== me.id) {
+			return json<ActionData>({ formError: "二次验证失败" }, { status: 403 });
+		}
+
+		const now = Date.now();
+		try {
+			for (const areaId of areaIds) {
+				await execute(
+					db,
+					"INSERT INTO discussion_area_role_permissions (area_id, role, inherit, can_view, can_post, can_comment, can_download_attachments, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(area_id, role) DO UPDATE SET inherit = excluded.inherit, can_view = excluded.can_view, can_post = excluded.can_post, can_comment = excluded.can_comment, can_download_attachments = excluded.can_download_attachments, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+					[areaId, role, inherit, canView, canPost, canComment, canDownloadAttachments, now, me.id],
+				);
+			}
+			await logEvent({
+				context,
+				userId: me.id,
+				eventType: "discussion_area_permissions_bulk_updated",
+				ip,
+				userAgent,
+				metadata: {
+					role,
+					areaIds,
+					inherit,
+					canView,
+					canPost,
+					canComment,
+					canDownloadAttachments,
+				},
+			});
+			return redirect("/admin/discussion-areas");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			await logEvent({
+				context,
+				userId: me.id,
+				eventType: "discussion_area_permissions_bulk_update_failed",
+				ip,
+				userAgent,
+				metadata: { role, areaIds, message },
+			});
+			if (message.includes("no such table") || message.includes("no such column")) {
+				return json<ActionData>({ formError: "数据库未升级：请先应用最新迁移" }, { status: 500 });
+			}
+			return json<ActionData>({ formError: "保存失败，请稍后重试" }, { status: 500 });
 		}
 	}
 
