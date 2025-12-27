@@ -40,6 +40,17 @@ export function isSuperadmin(user: AuthUser) {
 	return user.role === "superadmin" || user.role === "topadmin";
 }
 
+export function getRoleRank(role: UserRole) {
+	if (role === "topadmin") return 3;
+	if (role === "superadmin") return 2;
+	if (role === "admin") return 1;
+	return 0;
+}
+
+export function canModerateRole(actor: AuthUser, targetRole: UserRole) {
+	return getRoleRank(actor.role) > getRoleRank(targetRole);
+}
+
 export function assertNotBanned(user: AuthUser) {
 	if (user.isBanned) {
 		throw new Response("账号已被封禁", { status: 403 });

@@ -421,7 +421,11 @@ export default function MessagesPage() {
 													) : null}
 												</div>
 												<p className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-800 dark:text-gray-200">
-													{m.content}
+													{m.content.includes("<a ") || m.content.includes("<span ") ? (
+														<span dangerouslySetInnerHTML={{ __html: m.content }} />
+													) : (
+														m.content
+													)}
 												</p>
 												<div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
 													{new Date(m.createdAt).toLocaleString()}

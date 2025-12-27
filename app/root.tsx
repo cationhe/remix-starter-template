@@ -158,12 +158,6 @@ export default function App() {
 											>
 												用户管理
 											</Link>
-											<Link
-												to="/admin/quotas"
-												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-											>
-												限额管理
-											</Link>
 											{user.role === "superadmin" || user.role === "topadmin" ? (
 												<>
 												<Link
@@ -184,20 +178,8 @@ export default function App() {
 										>
 											讨论区管理
 										</Link>
-												<Link
-													to="/admin/storage"
-													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-												>
-													存储容量
-												</Link>
 											</>
 										) : null}
-										<Link
-											to="/admin/attachments"
-											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-										>
-											附件管理
-										</Link>
 									</>
 								) : null}
 								<Link

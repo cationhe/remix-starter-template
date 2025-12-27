@@ -585,11 +585,6 @@ export default function MePage() {
 							<p>
 								如需临时提高额度，可在 <Link to="/messages" className="underline">消息中心</Link> 给管理员发送申请。
 							</p>
-							{me.role === "admin" || me.role === "superadmin" || me.role === "topadmin" ? (
-								<p>
-									可在 <Link to="/admin/quotas" className="underline">限额管理</Link> 为用户设置临时限额（有有效期）。
-								</p>
-							) : null}
 						</div>
 					</details>
 				</section>

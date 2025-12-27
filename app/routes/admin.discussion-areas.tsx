@@ -500,18 +500,6 @@ export default function AdminDiscussionAreasPage() {
 							用户管理
 						</Link>
 						<Link
-							to="/admin/storage"
-							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-						>
-							存储容量
-						</Link>
-						<Link
-							to="/admin/attachments"
-							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-						>
-							附件管理
-						</Link>
-						<Link
 							to="/posts"
 							className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
 						>

@@ -5,14 +5,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
 import {
-	assertAdmin,
 	assertNotBanned,
+	canModerateRole,
 	consumeDailyQuota,
 	findUserById,
 	getClientIp,
 	isSuperadmin,
 	requireUser,
 	sendEmail,
+	type UserRole,
 } from "~/lib/auth.server";
 import {
 	getAttachmentStorageUsage,
@@ -57,6 +58,7 @@ type PostDetail = {
 	updatedBy: number | null;
 	authorId: number;
 	authorName: string;
+	authorRole: UserRole;
 	updatedByName: string | null;
 	isHidden: number;
 	hiddenAt: number | null;
@@ -93,6 +95,7 @@ type CommentItem = {
 	updatedAt: number | null;
 	authorId: number;
 	authorName: string;
+	authorRole: UserRole;
 	isShielded: number;
 	shieldedAt: number | null;
 	shieldedBy: number | null;
@@ -156,13 +159,13 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const db = getDBFromContext(context);
 	let postRow: PostDetailRow | null = null;
 	const sqlFull =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const sqlNoUpdatedBy =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const sqlNoHidden =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const sqlNoUpdatedNoHidden =
-		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, users.role as authorRole, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
 	const candidates = [sqlFull, sqlNoUpdatedBy, sqlNoHidden, sqlNoUpdatedNoHidden];
 	let lastError: unknown = null;
 	for (const sql of candidates) {
@@ -194,7 +197,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		);
 		updatedByName = row?.displayName ?? null;
 	}
-	const post: PostDetail = { ...postRow, updatedByName };
+	const post: PostDetail = { ...postRow, authorRole: (postRow.authorRole as UserRole) ?? "user", updatedByName };
 
 	let accessHeaders: HeadersInit | undefined = undefined;
 	const canBypassHidden = user?.role === "topadmin" || user?.id === post.authorId;
@@ -237,7 +240,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	try {
 		comments = await queryAll<CommentItem>(
 			db,
-			"SELECT c.id as id, c.content as content, c.created_at as createdAt, c.updated_at as updatedAt, c.author_id as authorId, u.display_name as authorName, c.is_shielded as isShielded, c.shielded_at as shieldedAt, c.shielded_by as shieldedBy, su.display_name as shieldedByName, c.shield_reason as shieldReason FROM comments c JOIN users u ON c.author_id = u.id LEFT JOIN users su ON c.shielded_by = su.id WHERE c.post_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
+			"SELECT c.id as id, c.content as content, c.created_at as createdAt, c.updated_at as updatedAt, c.author_id as authorId, u.display_name as authorName, u.role as authorRole, c.is_shielded as isShielded, c.shielded_at as shieldedAt, c.shielded_by as shieldedBy, su.display_name as shieldedByName, c.shield_reason as shieldReason FROM comments c JOIN users u ON c.author_id = u.id LEFT JOIN users su ON c.shielded_by = su.id WHERE c.post_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
 			[id, pageSize, offset],
 		);
 	} catch (error) {
@@ -245,7 +248,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		if (message.includes("no such column") || message.includes("no such table")) {
 			comments = await queryAll<CommentItem>(
 				db,
-				"SELECT c.id as id, c.content as content, c.created_at as createdAt, NULL as updatedAt, c.author_id as authorId, u.display_name as authorName, 0 as isShielded, NULL as shieldedAt, NULL as shieldedBy, NULL as shieldedByName, NULL as shieldReason FROM comments c JOIN users u ON c.author_id = u.id WHERE c.post_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
+				"SELECT c.id as id, c.content as content, c.created_at as createdAt, NULL as updatedAt, c.author_id as authorId, u.display_name as authorName, u.role as authorRole, 0 as isShielded, NULL as shieldedAt, NULL as shieldedBy, NULL as shieldedByName, NULL as shieldReason FROM comments c JOIN users u ON c.author_id = u.id WHERE c.post_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT ? OFFSET ?",
 				[id, pageSize, offset],
 			);
 		} else {
@@ -504,18 +507,54 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "banPost") {
-		assertAdmin(user);
+		if (user.role !== "admin" && user.role !== "superadmin" && user.role !== "topadmin") {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"post_ban_denied_not_admin",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, role: user.role }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "需要管理员权限" }, { status: 403 });
+		}
 		const reason = String(formData.get("reason") || "").trim();
 		if (!reason) {
 			return json<ActionData>({ formError: "请输入封禁原因" }, { status: 400 });
 		}
-		const postRow = await queryOne<{ authorId: number; isBanned: number }>(
+		const postRow = await queryOne<{ authorId: number; isBanned: number; authorRole: string }>(
 			db,
-			"SELECT author_id as authorId, is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
+			"SELECT p.author_id as authorId, p.is_banned as isBanned, u.role as authorRole FROM posts p JOIN users u ON p.author_id = u.id WHERE p.id = ? AND p.deleted_at IS NULL",
 			[postId],
 		);
 		if (!postRow) {
 			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		const targetRole = postRow.authorRole as UserRole;
+		if (!canModerateRole(user, targetRole)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"post_ban_denied_hierarchy",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, actorUserId: userId, actorRole: user.role, targetUserId: postRow.authorId, targetRole }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "权限不足" }, { status: 403 });
 		}
 		if (postRow.isBanned) {
 			return json<ActionData>({ formError: "帖子已封禁" }, { status: 400 });
@@ -593,13 +632,32 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			}
 			return json<ActionData>({ formError: "只有超级管理员或站点管理员可以解封帖子" }, { status: 403 });
 		}
-		const postRow = await queryOne<{ isBanned: number }>(
+		const postRow = await queryOne<{ isBanned: number; authorId: number; authorRole: string }>(
 			db,
-			"SELECT is_banned as isBanned FROM posts WHERE id = ? AND deleted_at IS NULL",
+			"SELECT p.is_banned as isBanned, p.author_id as authorId, u.role as authorRole FROM posts p JOIN users u ON p.author_id = u.id WHERE p.id = ? AND p.deleted_at IS NULL",
 			[postId],
 		);
 		if (!postRow) {
 			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		const targetRole = postRow.authorRole as UserRole;
+		if (!canModerateRole(user, targetRole)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"post_unban_denied_hierarchy",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, actorUserId: userId, actorRole: user.role, targetUserId: postRow.authorId, targetRole }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "权限不足" }, { status: 403 });
 		}
 		if (!postRow.isBanned) {
 			return json<ActionData>({ formError: "帖子未封禁" }, { status: 400 });
@@ -707,6 +765,13 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await removeAllPostImagesForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
+			// 清理隐藏帖子相关的邀请和 token，防止外键约束冲突
+			try {
+				await execute(db, "DELETE FROM hidden_post_invites WHERE post_id = ?", [postId]);
+				await execute(db, "DELETE FROM hidden_post_access_tokens WHERE post_id = ?", [postId]);
+			} catch {
+				// 忽略表不存在的情况
+			}
 			await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
 			try {
 				await execute(
@@ -731,7 +796,14 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		if (!postOwner) {
 			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
 		}
-		if (postOwner.authorId !== userId) {
+		if (postOwner.authorId !== userId && user.role !== "topadmin" && user.role !== "superadmin") {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_delete_denied", ip, userAgent, JSON.stringify({ postId, postAuthorId: postOwner.authorId, userRole: user.role }), Date.now()],
+				);
+			} catch {}
 			return json<ActionData>({ formError: "无权删除该帖子" }, { status: 403 });
 		}
 		try {
@@ -740,10 +812,30 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await removeAllPostImagesForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
-			await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
+			// 清理隐藏帖子相关的邀请和 token，防止外键约束冲突
+			try {
+				await execute(db, "DELETE FROM hidden_post_invites WHERE post_id = ?", [postId]);
+				await execute(db, "DELETE FROM hidden_post_access_tokens WHERE post_id = ?", [postId]);
+			} catch {
+				// 忽略表不存在的情况
+			}
+			try {
+				await execute(db, "DELETE FROM posts WHERE id = ?", [postId]);
+			} catch (dbError) {
+				console.error("D1 Delete Post Error:", dbError);
+				throw dbError;
+			}
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_deleted", ip, userAgent, JSON.stringify({ postId, postAuthorId: postOwner.authorId, deletedByRole: user.role }), Date.now()],
+				);
+			} catch {}
 			return redirect("/posts");
 		} catch (error) {
-			return json<ActionData>({ formError: "删帖失败，请稍后重试" }, { status: 500 });
+			console.error("Delete Post Full Error:", error);
+			return json<ActionData>({ formError: `删帖失败: ${error instanceof Error ? error.message : "未知错误"}` }, { status: 500 });
 		}
 	}
 
@@ -1028,7 +1120,24 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 
 	if (intent === "shieldComment") {
-		assertAdmin(user);
+		if (user.role !== "admin" && user.role !== "superadmin" && user.role !== "topadmin") {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"comment_shield_denied_not_admin",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, role: user.role }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			return json({ ok: false, error: "需要管理员权限" }, { status: 403 });
+		}
 		const commentIdRaw = String(formData.get("commentId") || "");
 		const commentId = Number(commentIdRaw);
 		if (!commentIdRaw || Number.isNaN(commentId) || commentId <= 0) {
@@ -1041,11 +1150,11 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		if (reason.length > 200) {
 			return json({ ok: false, error: "屏蔽原因过长（最多 200 字）" }, { status: 400 });
 		}
-		let row: { content: string; authorId: number; postId: number; isShielded: number } | null = null;
+		let row: { content: string; authorId: number; authorRole: string; postId: number; isShielded: number } | null = null;
 		try {
-			row = await queryOne<{ content: string; authorId: number; postId: number; isShielded: number }>(
+			row = await queryOne<{ content: string; authorId: number; authorRole: string; postId: number; isShielded: number }>(
 				db,
-				"SELECT content as content, author_id as authorId, post_id as postId, is_shielded as isShielded FROM comments WHERE id = ? AND deleted_at IS NULL",
+				"SELECT c.content as content, c.author_id as authorId, u.role as authorRole, c.post_id as postId, c.is_shielded as isShielded FROM comments c JOIN users u ON c.author_id = u.id WHERE c.id = ? AND c.deleted_at IS NULL",
 				[commentId],
 			);
 		} catch (error) {
@@ -1063,6 +1172,25 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		}
 		if (row.isShielded) {
 			return json({ ok: false, error: "评论已被屏蔽" }, { status: 400 });
+		}
+		const targetRole = row.authorRole as UserRole;
+		if (!canModerateRole(user, targetRole)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"comment_shield_denied_hierarchy",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, commentId, actorUserId: userId, actorRole: user.role, targetUserId: row.authorId, targetRole }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			return json({ ok: false, error: "权限不足" }, { status: 403 });
 		}
 		const post = await queryOne<{ title: string }>(db, "SELECT title as title FROM posts WHERE id = ? AND deleted_at IS NULL", [postId]);
 		if (!post) {
@@ -1158,6 +1286,30 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		if (comment.postId !== postId) {
 			return json({ ok: false, error: "评论不属于当前帖子" }, { status: 400 });
 		}
+		const commentAuthor = await queryOne<{ role: string }>(
+			db,
+			"SELECT role as role FROM users WHERE id = ? AND deleted_at IS NULL",
+			[comment.authorId],
+		);
+		const targetRole = (commentAuthor?.role as UserRole) ?? "user";
+		if (!canModerateRole(user, targetRole)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"comment_unshield_denied_hierarchy",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, commentId, actorUserId: userId, actorRole: user.role, targetUserId: comment.authorId, targetRole }),
+						Date.now(),
+					],
+				);
+			} catch {
+			}
+			return json({ ok: false, error: "权限不足" }, { status: 403 });
+		}
 		const now = Date.now();
 		await execute(
 			db,
@@ -1237,6 +1389,17 @@ export default function PostDetailPage() {
 	);
 	const isSuperadminUser = data.user?.role === "superadmin" || data.user?.role === "topadmin";
 	const isTopadminUser = data.user?.role === "topadmin";
+	const getRoleRank = (role: UserRole | null | undefined) => {
+		if (role === "topadmin") return 3;
+		if (role === "superadmin") return 2;
+		if (role === "admin") return 1;
+		return 0;
+	};
+	const canModerateTargetRole = (targetRole: UserRole) => {
+		const actorRole = data.user?.role;
+		if (!actorRole) return false;
+		return getRoleRank(actorRole) > getRoleRank(targetRole);
+	};
 	const commentStartIndex = (data.page - 1) * data.pageSize;
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
@@ -2401,8 +2564,8 @@ export default function PostDetailPage() {
 										编辑
 									</Link>
 								) : null}
-								{data.user && data.user.id === data.post.authorId ? (
-									isBanned ? (
+								{(data.user && (data.user.id === data.post.authorId || data.user.role === "topadmin" || data.user.role === "superadmin")) ? (
+									(isBanned && data.user.id === data.post.authorId) ? (
 										<button
 											type="button"
 											disabled
@@ -2599,9 +2762,16 @@ export default function PostDetailPage() {
 													placeholder="请输入封禁原因（必填）"
 												/>
 											</div>
-											<button type="submit" className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+											<button
+												type="submit"
+												disabled={!canModerateTargetRole(data.post.authorRole)}
+												className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+											>
 												封禁帖子
 											</button>
+											{!canModerateTargetRole(data.post.authorRole) ? (
+												<span className="text-xs text-red-600">权限不足</span>
+											) : null}
 										</Form>
 									)}
 									{isSuperadminUser ? (
@@ -3023,6 +3193,38 @@ export default function PostDetailPage() {
 									const busy = Boolean(commentBusyIds[comment.id]);
 									const isEditing = editingCommentId === comment.id;
 									const shielded = Boolean(comment.isShielded);
+									const canModerate = isAdminUser ? canModerateTargetRole(comment.authorRole) : false;
+									const canShield = canModerate;
+									const canUnshield = isSuperadminUser && canModerate;
+									const shieldActionDisabled = busy || (shielded ? !canUnshield : !canShield);
+									const showShieldPermissionDenied = (!shielded && !canShield) || (shielded && isSuperadminUser && !canUnshield);
+									const selected = commentSelectedAttachmentIds[comment.id] || [];
+									const deletingSelected = selected.some((id) => Boolean(deletingCommentAttachmentIds[id]));
+									const deleteSelectedDisabled = !selected.length || deletingSelected;
+									const deleteSelectedText = deletingSelected ? "删除中..." : "删除所选";
+									const commentUploadState = commentUploads[comment.id] || { selectedFiles: [], queue: [], busy: false, error: null };
+									const uploadingCount = commentUploadState.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
+									const remainingUploadSlots = Math.max(
+										0,
+										attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT - comment.attachments.length - uploadingCount,
+									);
+									const effectiveSelectedFiles = commentUploadState.selectedFiles.slice(0, remainingUploadSlots);
+									const existingBytes = comment.attachments.reduce(
+										(sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0),
+										0,
+									);
+									const uploadingBytes = commentUploadState.queue
+										.filter((q) => q.status === "pending" || q.status === "uploading")
+										.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
+									const selectedBytes = effectiveSelectedFiles.reduce(
+										(sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0),
+										0,
+									);
+									const remainingBytes = Math.max(
+										0,
+										attachmentLimits.MAX_TOTAL_COMMENT_BYTES - existingBytes - uploadingBytes,
+									);
+									const overLimit = selectedBytes > remainingBytes;
 									return (
 										<li
 											key={comment.id}
@@ -3128,22 +3330,21 @@ export default function PostDetailPage() {
 															</>
 														) : null}
 														{isAdminUser ? (
-															<button
-																type="button"
-																onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
-																disabled={busy || (shielded && !isSuperadminUser)}
-																className={
-																	shielded
-																		? "rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
-																		: "rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
-																}
-															>
-																{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
-															</button>
+															<div className="flex items-center gap-2">
+																<button
+																	type="button"
+																	onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
+																	disabled={shieldActionDisabled}
+																	className="rounded border border-red-500 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-900/30"
+																>
+																	{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
+																</button>
+																{showShieldPermissionDenied ? <span className="text-[11px] text-red-600">权限不足</span> : null}
+															</div>
 														) : null}
-													</div>
-												</div>
-											</div>
+										</div>
+									</div>
+								</div>
 										{comment.attachments.length === 0 ? null : (
 											<ul className="mt-3 space-y-2">
 												{comment.attachments.map((a) => (
@@ -3230,22 +3431,14 @@ export default function PostDetailPage() {
 											>
 												{(commentSelectedAttachmentIds[comment.id] || []).length === comment.attachments.length ? "清空选择" : "全选"}
 											</button>
-											<button
-												type="button"
-												onClick={() => deleteCommentAttachments(comment.id, commentSelectedAttachmentIds[comment.id] || [])}
-												disabled={(() => {
-													const selected = commentSelectedAttachmentIds[comment.id] || [];
-													if (!selected.length) return true;
-													return selected.some((id) => Boolean(deletingCommentAttachmentIds[id]));
-											})()}
-												className="rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
-											>
-												{(() => {
-													const selected = commentSelectedAttachmentIds[comment.id] || [];
-													const deleting = selected.some((id) => Boolean(deletingCommentAttachmentIds[id]));
-													return deleting ? "删除中..." : "删除所选";
-											})()}
-											</button>
+														<button
+																type="button"
+																onClick={() => deleteCommentAttachments(comment.id, commentSelectedAttachmentIds[comment.id] || [])}
+																disabled={deleteSelectedDisabled}
+																className="rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
+															>
+																{deleteSelectedText}
+															</button>
 										</div>
 									) : null}
 
@@ -3255,17 +3448,8 @@ export default function PostDetailPage() {
 													<div className="min-w-0">
 														<div className="text-sm font-medium text-gray-900 dark:text-gray-100">上传评论附件</div>
 												<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-											剩余可上传：
-											{(() => {
-												const maxFilesPerComment = attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
-												const uploading =
-													commentUploads[comment.id]?.queue.filter((q) => q.status === "pending" || q.status === "uploading")
-														.length || 0;
-												const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploading);
-												return String(remaining);
-											})()}
-											个；单条评论总大小上限 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
-												</div>
+																剩余可上传：{String(remainingUploadSlots)} 个；单条评论总大小上限 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
+															</div>
 													</div>
 													<button
 														type="button"
@@ -3300,58 +3484,41 @@ export default function PostDetailPage() {
 									className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
 								/>
 													</div>
-													{(() => {
-														const state = commentUploads[comment.id] || { selectedFiles: [], queue: [], busy: false, error: null };
-														const uploadingCount = state.queue.filter((q) => q.status === "pending" || q.status === "uploading").length;
-													const maxFilesPerComment = attachmentLimits.MAX_ATTACHMENTS_PER_COMMENT;
-													const maxTotalCommentBytes = attachmentLimits.MAX_TOTAL_COMMENT_BYTES;
-														const remaining = Math.max(0, maxFilesPerComment - comment.attachments.length - uploadingCount);
-														const effective = state.selectedFiles.slice(0, remaining);
-														const existingBytes = comment.attachments.reduce((sum, a) => sum + (Number.isFinite(a.sizeBytes) ? a.sizeBytes : 0), 0);
-														const uploadingBytes = state.queue
-															.filter((q) => q.status === "pending" || q.status === "uploading")
-															.reduce((sum, q) => sum + (Number.isFinite(q.file.size) ? q.file.size : 0), 0);
-														const selectedBytes = effective.reduce((sum, f) => sum + (Number.isFinite(f.size) ? f.size : 0), 0);
-													const remainingBytes = Math.max(0, maxTotalCommentBytes - existingBytes - uploadingBytes);
-													const overLimit = selectedBytes > remainingBytes;
-														return (
-															<>
-																<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
-																	<span>
-																		已选 {formatSize(selectedBytes)} / 剩余 {formatSize(remainingBytes)}
-																	</span>
-																	{state.selectedFiles.length > remaining ? (
-																		<span className="text-amber-700 dark:text-amber-300">
-																			已选择 {state.selectedFiles.length} 个，仅上传前 {remaining} 个
+																<div>
+																	<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+																		<span>
+																			已选 {formatSize(selectedBytes)} / 剩余 {formatSize(remainingBytes)}
 																		</span>
-																	) : null}
-																{overLimit ? (
-																	<span className="text-red-600 dark:text-red-300">
-																		已超出 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)} 上限
-																	</span>
-																) : null}
-															</div>
-																{effective.length > 0 ? (
-																	<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
-																		{effective.map((f) => (
-																			<li key={f.name} className="flex items-center justify-between gap-3">
-																				<span className="min-w-0 truncate">{f.name}</span>
-																				<span className="shrink-0 text-gray-500 dark:text-gray-400">
-																					{formatSize(f.size)}
-																					{f.type ? ` · ${f.type}` : ""}
-																				</span>
-																			</li>
-																		))}
-																	</ul>
-																) : null}
-																{commentUploads[comment.id]?.error ? (
-																	<div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
-																		{commentUploads[comment.id]?.error}
+																		{commentUploadState.selectedFiles.length > remainingUploadSlots ? (
+																			<span className="text-amber-700 dark:text-amber-300">
+																				已选择 {commentUploadState.selectedFiles.length} 个，仅上传前 {remainingUploadSlots} 个
+																			</span>
+																		) : null}
+																		{overLimit ? (
+																			<span className="text-red-600 dark:text-red-300">
+																				已超出 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)} 上限
+																			</span>
+																		) : null}
 																	</div>
-																) : null}
-															</>
-														);
-													})()}
+																	{effectiveSelectedFiles.length > 0 ? (
+																		<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+																			{effectiveSelectedFiles.map((f) => (
+																				<li key={f.name} className="flex items-center justify-between gap-3">
+																					<span className="min-w-0 truncate">{f.name}</span>
+																					<span className="shrink-0 text-gray-500 dark:text-gray-400">
+																						{formatSize(f.size)}
+																						{f.type ? ` · ${f.type}` : ""}
+																					</span>
+																				</li>
+																			))}
+																		</ul>
+																	) : null}
+																	{commentUploadState.error ? (
+																		<div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+																			{commentUploadState.error}
+																		</div>
+																	) : null}
+																</div>
 													{commentUploads[comment.id]?.queue?.length ? (
 														<ul className="mt-2 space-y-2">
 															{commentUploads[comment.id].queue.map((q) => (

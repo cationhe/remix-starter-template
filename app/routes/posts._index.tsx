@@ -40,7 +40,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	}
 	const db = getDBFromContext(context);
 	const now = Date.now();
-	const canSeeHidden = user?.role === "topadmin";
+	const canSeeHidden = user?.role === "superadmin" || user?.role === "topadmin";
 	const areas = await queryAll<AreaListItem>(
 		db,
 		"SELECT id as id, name as name, sort_order as sortOrder, is_hidden as isHidden FROM discussion_areas ORDER BY sort_order ASC, id ASC",
