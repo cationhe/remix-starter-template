@@ -221,7 +221,6 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
 	function normalizePermValue(value: FormDataEntryValue | null): number | null {
 		const raw = typeof value === "string" ? value.trim() : "";
-		if (raw === "inherit") return null;
 		if (raw === "allow" || raw === "1") return 1;
 		if (raw === "deny" || raw === "0") return 0;
 		return null;
@@ -260,19 +259,11 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				try {
 					const roles: UserRole[] = ["user", "admin", "superadmin", "topadmin"];
 					for (const role of roles) {
-						if (role === "user") {
-							await execute(
-								db,
-								"INSERT OR IGNORE INTO discussion_area_role_permissions (area_id, role, inherit, can_view, can_post, can_comment, can_download_attachments, updated_at, updated_by) VALUES (?, ?, 0, 1, 1, 1, 1, ?, ?)",
-								[createdAreaId, role, now, me.id],
-							);
-						} else {
-							await execute(
-								db,
-								"INSERT OR IGNORE INTO discussion_area_role_permissions (area_id, role, inherit, can_view, can_post, can_comment, can_download_attachments, updated_at, updated_by) VALUES (?, ?, 1, NULL, NULL, NULL, NULL, ?, ?)",
-								[createdAreaId, role, now, me.id],
-							);
-						}
+						await execute(
+							db,
+							"INSERT OR IGNORE INTO discussion_area_role_permissions (area_id, role, inherit, can_view, can_post, can_comment, can_download_attachments, updated_at, updated_by) VALUES (?, ?, 0, 1, 1, 1, 1, ?, ?)",
+							[createdAreaId, role, now, me.id],
+						);
 					}
 					await logEvent({
 						context,
@@ -336,14 +327,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		if (areaIds.length > 200) {
 			return json<ActionData>({ formError: "一次最多批量设置 200 个讨论区" }, { status: 400 });
 		}
-		const inheritRaw = String(formData.get("inherit") || "1").trim();
-		const inherit = inheritRaw === "0" ? 0 : 1;
+		const inherit = 0;
 		const canView = normalizePermValue(formData.get("canView"));
 		const canPost = normalizePermValue(formData.get("canPost"));
 		const canComment = normalizePermValue(formData.get("canComment"));
 		const canDownloadAttachments = normalizePermValue(formData.get("canDownloadAttachments"));
-		if (!inherit && (canView === null || canPost === null || canComment === null || canDownloadAttachments === null)) {
-			return json<ActionData>({ formError: "关闭继承时，所有权限必须明确指定允许或禁止" }, { status: 400 });
+		if (canView === null || canPost === null || canComment === null || canDownloadAttachments === null) {
+			return json<ActionData>({ formError: "所有权限必须明确指定允许或禁止" }, { status: 400 });
 		}
 		const password = String(formData.get("password") || "").trim();
 		if (!password) {
@@ -654,13 +644,10 @@ export default function AdminDiscussionAreasPage() {
 	const [dialogSubmitting, setDialogSubmitting] = useState(false);
 	const [bulkAreaIds, setBulkAreaIds] = useState("");
 	const [bulkRole, setBulkRole] = useState<RoleKey>("user");
-	const [bulkInherit, setBulkInherit] = useState<"1" | "0">("1");
-	const [bulkCanView, setBulkCanView] = useState<"inherit" | "allow" | "deny">("inherit");
-	const [bulkCanPost, setBulkCanPost] = useState<"inherit" | "allow" | "deny">("inherit");
-	const [bulkCanComment, setBulkCanComment] = useState<"inherit" | "allow" | "deny">("inherit");
-	const [bulkCanDownloadAttachments, setBulkCanDownloadAttachments] = useState<"inherit" | "allow" | "deny">(
-		"inherit",
-	);
+	const [bulkCanView, setBulkCanView] = useState<"allow" | "deny">("allow");
+	const [bulkCanPost, setBulkCanPost] = useState<"allow" | "deny">("allow");
+	const [bulkCanComment, setBulkCanComment] = useState<"allow" | "deny">("allow");
+	const [bulkCanDownloadAttachments, setBulkCanDownloadAttachments] = useState<"allow" | "deny">("allow");
 	const [bulkPassword, setBulkPassword] = useState("");
 
 	useEffect(() => {
@@ -1038,7 +1025,6 @@ export default function AdminDiscussionAreasPage() {
 
 								<Form method="post" className="mt-4 grid gap-3">
 									<input type="hidden" name="intent" value="bulkSetPermissions" />
-									<div className="grid gap-3 sm:grid-cols-2">
 										<div>
 											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">用户组</label>
 											<select
@@ -1054,19 +1040,6 @@ export default function AdminDiscussionAreasPage() {
 												))}
 											</select>
 										</div>
-										<div>
-											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">继承</label>
-											<select
-												name="inherit"
-												value={bulkInherit}
-												onChange={(e) => setBulkInherit(e.target.value === "0" ? "0" : "1")}
-												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-											>
-												<option value="1">开启继承</option>
-												<option value="0">关闭继承</option>
-											</select>
-										</div>
-									</div>
 
 									<div>
 										<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">讨论区ID</label>
@@ -1083,56 +1056,52 @@ export default function AdminDiscussionAreasPage() {
 									<div className="grid gap-3 sm:grid-cols-2">
 										<div>
 											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">可见</label>
-											<select
-												name="canView"
-												value={bulkCanView}
-												onChange={(e) => setBulkCanView(e.target.value as any)}
-												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-											>
-												<option value="inherit">继承</option>
-												<option value="allow">允许</option>
-												<option value="deny">禁止</option>
-											</select>
-										</div>
+										<select
+											name="canView"
+											value={bulkCanView}
+											onChange={(e) => setBulkCanView(e.target.value as any)}
+											className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+										>
+											<option value="allow">允许</option>
+											<option value="deny">禁止</option>
+										</select>
+									</div>
 										<div>
 											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">发帖</label>
-											<select
-												name="canPost"
-												value={bulkCanPost}
-												onChange={(e) => setBulkCanPost(e.target.value as any)}
-												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-											>
-												<option value="inherit">继承</option>
-												<option value="allow">允许</option>
-												<option value="deny">禁止</option>
-											</select>
-										</div>
+										<select
+											name="canPost"
+											value={bulkCanPost}
+											onChange={(e) => setBulkCanPost(e.target.value as any)}
+											className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+										>
+											<option value="allow">允许</option>
+											<option value="deny">禁止</option>
+										</select>
+									</div>
 										<div>
 											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">评论</label>
-											<select
-												name="canComment"
-												value={bulkCanComment}
-												onChange={(e) => setBulkCanComment(e.target.value as any)}
-												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-											>
-												<option value="inherit">继承</option>
-												<option value="allow">允许</option>
-												<option value="deny">禁止</option>
-											</select>
-										</div>
+										<select
+											name="canComment"
+											value={bulkCanComment}
+											onChange={(e) => setBulkCanComment(e.target.value as any)}
+											className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+										>
+											<option value="allow">允许</option>
+											<option value="deny">禁止</option>
+										</select>
+									</div>
 										<div>
 											<label className="block text-sm font-medium text-gray-700 dark:text-gray-200">下载附件</label>
-											<select
-												name="canDownloadAttachments"
-												value={bulkCanDownloadAttachments}
-												onChange={(e) => setBulkCanDownloadAttachments(e.target.value as any)}
-												className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-											>
-												<option value="inherit">继承</option>
-												<option value="allow">允许</option>
-												<option value="deny">禁止</option>
-											</select>
-										</div>
+										<select
+											name="canDownloadAttachments"
+											value={bulkCanDownloadAttachments}
+											onChange={(e) => setBulkCanDownloadAttachments(e.target.value as any)}
+											className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+										>
+											<option value="allow">允许</option>
+											<option value="deny">禁止</option>
+										</select>
+									</div>
 									</div>
 
 									<div>

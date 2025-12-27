@@ -200,9 +200,18 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		updatedByName = row?.displayName ?? null;
 	}
 	const post: PostDetail = { ...postRow, authorRole: (postRow.authorRole as UserRole) ?? "user", updatedByName };
+
+	let accessHeaders: HeadersInit | undefined = undefined;
+	const canBypassHidden = user?.role === "topadmin" || user?.role === "superadmin" || user?.id === post.authorId;
+	const hasHiddenInvite = Boolean(post.isHidden && user && !canBypassHidden);
+	if (hasHiddenInvite) {
+		const access = await ensureHiddenPostReadable({ request, context, postId: id, isHidden: true, user });
+		accessHeaders = access.headers;
+	}
+
 	if (user) {
 		const permissionReady = await isDiscussionPermissionsReady(context);
-		if (permissionReady) {
+		if (permissionReady && !(post.isHidden && (hasHiddenInvite || canBypassHidden))) {
 			const ok = await canViewDiscussionArea(context, post.areaId, user.role);
 			if (!ok) {
 				const ip = getClientIp(request);
@@ -218,13 +227,6 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 				throw new Response("帖子不存在", { status: 404 });
 			}
 		}
-	}
-
-	let accessHeaders: HeadersInit | undefined = undefined;
-	const canBypassHidden = user?.role === "topadmin" || user?.id === post.authorId;
-	if (post.isHidden && !canBypassHidden) {
-		const access = await ensureHiddenPostReadable({ request, context, postId: id, isHidden: true, user });
-		accessHeaders = access.headers;
 	}
 
 	const hiddenInvites =
@@ -396,25 +398,29 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	}
 	const isHiddenPost = Boolean(postAccess.isHidden);
 	const canBypassHidden = user.role === "topadmin" || user.role === "superadmin" || userId === postAccess.authorId;
+	let hasHiddenInvite = false;
 	if (isHiddenPost && !canBypassHidden) {
 		const invited = await isUserInvitedToHiddenPost(context, postId, userId);
 		if (!invited) {
 			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
 		}
+		hasHiddenInvite = true;
 	}
 	const permissionReady = await isDiscussionPermissionsReady(context);
 	if (permissionReady) {
-		const ok = await canViewDiscussionArea(context, postAccess.areaId, user.role);
-		if (!ok) {
-			try {
-				await execute(
-					db,
-					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-					[userId, "discussion_area_view_denied", ip, userAgent, JSON.stringify({ areaId: postAccess.areaId, postId, intent }), Date.now()],
-				);
-			} catch {
+		if (!(isHiddenPost && (hasHiddenInvite || canBypassHidden))) {
+			const ok = await canViewDiscussionArea(context, postAccess.areaId, user.role);
+			if (!ok) {
+				try {
+					await execute(
+						db,
+						"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						[userId, "discussion_area_view_denied", ip, userAgent, JSON.stringify({ areaId: postAccess.areaId, postId, intent }), Date.now()],
+					);
+				} catch {
+				}
+				return json<ActionData>({ formError: "权限不足" }, { status: 403 });
 			}
-			return json<ActionData>({ formError: "权限不足" }, { status: 403 });
 		}
 	}
 
