@@ -512,6 +512,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			);
 			const moveCount = Number(moveRow?.count ?? 0) || 0;
 			await execute(db, "UPDATE posts SET area_id = 1 WHERE area_id = ?", [areaId]);
+			try {
+				await execute(db, "DELETE FROM discussion_area_role_permissions WHERE area_id = ?", [areaId]);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : "";
+				if (!message.includes("no such table")) {
+					throw error;
+				}
+			}
 			await execute(db, "DELETE FROM discussion_areas WHERE id = ?", [areaId]);
 			await logEvent({
 				context,

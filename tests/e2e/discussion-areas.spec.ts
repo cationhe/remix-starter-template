@@ -5,6 +5,10 @@ function randomFakeIp(prefix: string) {
 	return `${prefix}.${Math.floor(Math.random() * 200) + 1}.${Math.floor(Math.random() * 200) + 1}`;
 }
 
+function getDialogByTitle(page: any, title: string) {
+	return page.locator("div.fixed.inset-0").filter({ has: page.getByRole("heading", { name: title }) });
+}
+
 async function expectHasAreaNameInput(page: any, name: string) {
 	const ok = await page.locator('input[name="name"]').evaluateAll((els: any, value: string) => {
 		return els.some((el: any) => String(el?.value || "") === value);
@@ -168,7 +172,7 @@ test("讨论区管理：超管可CRUD/排序/可见性并写入审计日志", as
 	const rowB = await getAreaRowByName(page, areaBRenamed);
 	await rowB.getByRole("button", { name: "设为隐藏" }).click();
 	await expect(page.getByRole("heading", { name: "修改可见性" })).toBeVisible();
-	await page.locator('input[name="password"]').fill(superadminPassword);
+	await getDialogByTitle(page, "修改可见性").locator('input[name="password"]').fill(superadminPassword);
 	await page.getByRole("button", { name: "确认执行" }).click();
 	await expect(rowB.getByText("隐藏")).toBeVisible();
 
@@ -184,7 +188,7 @@ test("讨论区管理：超管可CRUD/排序/可见性并写入审计日志", as
 
 	await page.getByRole("button", { name: "保存排序" }).click();
 	await expect(page.getByRole("heading", { name: "保存排序" })).toBeVisible();
-	await page.locator('input[name="password"]').fill(superadminPassword);
+	await getDialogByTitle(page, "保存排序").locator('input[name="password"]').fill(superadminPassword);
 	await page.getByRole("button", { name: "确认执行" }).click();
 	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
 	await expectAreaNameAtIndex(page, 1, areaBRenamed);
@@ -192,7 +196,7 @@ test("讨论区管理：超管可CRUD/排序/可见性并写入审计日志", as
 	const rowAAfterReorder = await getAreaRowByName(page, areaA);
 	await rowAAfterReorder.getByRole("button", { name: "删除" }).click();
 	await expect(page.getByRole("heading", { name: "删除讨论区" })).toBeVisible();
-	await page.locator('input[name="password"]').fill(superadminPassword);
+	await getDialogByTitle(page, "删除讨论区").locator('input[name="password"]').fill(superadminPassword);
 	await page.getByRole("button", { name: "确认执行" }).click();
 	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
 	await waitForNoAreaNameInput(page, areaA);
@@ -252,7 +256,7 @@ test("置顶作用域：置顶只在所属讨论区内生效；隐藏区普通�
 	const hiddenRow = await getAreaRowByName(page, hiddenArea);
 	await hiddenRow.getByRole("button", { name: "设为隐藏" }).click();
 	await expect(page.getByRole("heading", { name: "修改可见性" })).toBeVisible();
-	await page.locator('input[name="password"]').fill(superadminPassword);
+	await getDialogByTitle(page, "修改可见性").locator('input[name="password"]').fill(superadminPassword);
 	await page.getByRole("button", { name: "确认执行" }).click();
 	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
 	const hiddenRowAfter = await getAreaRowByName(page, hiddenArea);
@@ -433,7 +437,7 @@ test("讨论区详情页：隐藏讨论区普通用户访问返回404", async ({
 	const hiddenAreaId = Number(await hiddenRow.locator('input[name="areaId"]').inputValue());
 	await hiddenRow.getByRole("button", { name: "设为隐藏" }).click();
 	await expect(page.getByRole("heading", { name: "修改可见性" })).toBeVisible();
-	await page.locator('input[name="password"]').fill(superadminPassword);
+	await getDialogByTitle(page, "修改可见性").locator('input[name="password"]').fill(superadminPassword);
 	await page.getByRole("button", { name: "确认执行" }).click();
 	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
 	const hiddenRowAfter = await getAreaRowByName(page, hiddenArea);
@@ -486,7 +490,7 @@ test("讨论区管理：topadmin 可调整讨论区顺序并写入审计日志",
 
 	await page.getByRole("button", { name: "保存排序" }).click();
 	await expect(page.getByRole("heading", { name: "保存排序" })).toBeVisible();
-	await page.locator('input[name="password"]').fill(topadminPassword);
+	await getDialogByTitle(page, "保存排序").locator('input[name="password"]').fill(topadminPassword);
 	await page.getByRole("button", { name: "确认执行" }).click();
 	await expect(page.getByRole("heading", { name: "讨论区管理" })).toBeVisible();
 	const indexAAfterSave = await getAreaRowIndexByName(page, areaA);

@@ -25,8 +25,10 @@ const webServerCommand = [
 	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0020_topadmin_discussion_area_permissions.sql",
 	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0021_comment_moderation_and_edits.sql",
 	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0022_attachment_download_restrictions.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0023_hidden_posts.sql",
+	"CI=1 npx wrangler d1 execute forum_db --local --config wrangler.json -y --file migrations/0024_discussion_area_role_permissions.sql",
 	[
-		"CI=1 npx wrangler dev --port 8788 --ip 127.0.0.1 --show-interactive-dev-session=false",
+		"CI=1 npx wrangler dev --local --port 8788 --ip 127.0.0.1 --show-interactive-dev-session=false",
 		"--var EMAIL_PROVIDER:disabled",
 		"--var E2E:1",
 		"--var TOPADMIN_EMAIL:e2e_topadmin@example.com",

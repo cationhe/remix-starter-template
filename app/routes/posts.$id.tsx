@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json, redirect } from "@remix-run/cloudflare";
-import { Form, Link, Outlet, useActionData, useLoaderData, useLocation, useNavigation, useRevalidator } from "@remix-run/react";
+import { Form, Link, Outlet, useActionData, useFetcher, useLoaderData, useLocation, useNavigation, useRevalidator } from "@remix-run/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getDBFromContext, queryAll, queryOne, execute } from "~/lib/d1.server";
 import { getSession } from "~/lib/session.server";
@@ -38,6 +38,16 @@ import {
 	isUserInvitedToHiddenPost,
 } from "~/lib/hidden-posts.server";
 import { canCommentInDiscussionArea, canViewDiscussionArea, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
+
+function canSendMessage(senderRole: UserRole, recipientRole: UserRole) {
+	if (senderRole === "superadmin" || senderRole === "topadmin") {
+		return recipientRole === "admin" || recipientRole === "user";
+	}
+	if (senderRole === "admin") {
+		return recipientRole === "superadmin" || recipientRole === "topadmin" || recipientRole === "user";
+	}
+	return recipientRole === "superadmin" || recipientRole === "topadmin" || recipientRole === "admin";
+}
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 10,
@@ -108,6 +118,7 @@ type CommentItem = {
 
 type LoaderData = {
 	user: Awaited<ReturnType<typeof findUserById>>;
+	siteOrigin: string;
 	post: PostDetail;
 	hiddenInvites: Awaited<ReturnType<typeof listHiddenPostInvites>> | null;
 	attachments: AttachmentRecord[];
@@ -150,6 +161,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	}
 
 	const url = new URL(request.url);
+	const siteOrigin = url.origin;
 	const pageSize = 20;
 	const requestedPage = parsePositiveInt(url.searchParams.get("page"), 1);
 
@@ -340,6 +352,7 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	return json<LoaderData>(
 		{
 		user,
+		siteOrigin,
 		post,
 		hiddenInvites,
 		attachments,
@@ -370,7 +383,9 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const intent = String(formData.get("intent") || "comment");
 	const db = getDBFromContext(context);
 	const currentUrl = new URL(request.url);
-	const wantsJson = Boolean(request.headers.get("Accept")?.includes("application/json"));
+	const wantsJson =
+		Boolean(request.headers.get("Accept")?.includes("application/json")) ||
+		String(formData.get("wantsJson") || "") === "1";
 	const ip = getClientIp(request);
 	const userAgent = request.headers.get("User-Agent");
 
@@ -422,6 +437,132 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 				return json<ActionData>({ formError: "权限不足" }, { status: 403 });
 			}
 		}
+	}
+
+	if (intent === "sendAdminMessage") {
+		const isPrivileged = user.role === "topadmin" || user.role === "superadmin";
+		if (!isPrivileged) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "admin_message_send_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return wantsJson
+				? json({ ok: false as const, error: "权限不足" }, { status: 403 })
+				: json<ActionData>({ formError: "权限不足" }, { status: 403 });
+		}
+
+		const target = String(formData.get("target") || "post");
+		const subjectRaw = String(formData.get("subject") || "").trim();
+		const body = String(formData.get("body") || "").trim();
+		const safeSearchParams = new URLSearchParams(currentUrl.search);
+		safeSearchParams.delete("t");
+		const safeSearch = safeSearchParams.toString();
+		const baseUrl = `${currentUrl.origin}${currentUrl.pathname}${safeSearch ? `?${safeSearch}` : ""}`;
+		const now = Date.now();
+
+		let recipientId = 0;
+		let recipientRole: UserRole = "user";
+		let linkUrl = baseUrl;
+		let linkText = "";
+		let kindLabel: "帖子" | "评论" = "帖子";
+		let postTitle = "";
+		let commentId: number | null = null;
+
+		const postRow = await queryOne<{ title: string; authorRole: string; authorId: number }>(
+			db,
+			"SELECT posts.title as title, users.role as authorRole, posts.author_id as authorId FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
+			[postId],
+		);
+		if (!postRow) {
+			return wantsJson
+				? json({ ok: false as const, error: "帖子不存在" }, { status: 404 })
+				: json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		postTitle = postRow.title ?? `帖子#${postId}`;
+
+		if (target === "comment") {
+			kindLabel = "评论";
+			const raw = String(formData.get("commentId") || "").trim();
+			const parsed = Number(raw);
+			if (!raw || Number.isNaN(parsed) || !Number.isFinite(parsed) || parsed <= 0) {
+				return wantsJson
+					? json({ ok: false as const, error: "无效的评论ID" }, { status: 400 })
+					: json<ActionData>({ formError: "无效的评论ID" }, { status: 400 });
+			}
+			commentId = Math.floor(parsed);
+			const row = await queryOne<{ authorId: number; authorRole: string }>(
+				db,
+				"SELECT c.author_id as authorId, u.role as authorRole FROM comments c JOIN users u ON c.author_id = u.id WHERE c.id = ? AND c.post_id = ?",
+				[commentId, postId],
+			);
+			if (!row) {
+				return wantsJson
+					? json({ ok: false as const, error: "评论不存在" }, { status: 404 })
+					: json<ActionData>({ formError: "评论不存在" }, { status: 404 });
+			}
+			recipientId = row.authorId;
+			recipientRole = (row.authorRole as UserRole) ?? "user";
+			linkUrl = `${baseUrl}#comment-${commentId}`;
+			linkText = `评论：${postTitle}`;
+		} else {
+			kindLabel = "帖子";
+			recipientId = postRow.authorId;
+			recipientRole = (postRow.authorRole as UserRole) ?? "user";
+			linkText = `帖子：${postTitle}`;
+		}
+
+		if (!canSendMessage(user.role, recipientRole)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"admin_message_send_denied",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, commentId, recipientId, recipientRole, role: user.role }),
+						now,
+					],
+				);
+			} catch {
+			}
+			return wantsJson
+				? json({ ok: false as const, error: "无权向该用户发送消息" }, { status: 403 })
+				: json<ActionData>({ formError: "无权向该用户发送消息" }, { status: 403 });
+		}
+
+		const subject = subjectRaw || (kindLabel === "评论" ? "关于您的评论通知" : "关于您的帖子通知");
+		const markdownLink = `[${linkText}](${linkUrl})`;
+		const content = `${subject}\n\n关于您发布的${kindLabel}，管理员有以下通知：\n${body}\n\n${markdownLink}`.trim();
+		const result = await sendMessage(context, { sender: user, recipientId, content });
+		if (!result.ok) {
+			return wantsJson
+				? json({ ok: false as const, error: result.error }, { status: 400 })
+				: json<ActionData>({ formError: result.error }, { status: 400 });
+		}
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					userId,
+					"admin_message_sent",
+					ip,
+					userAgent,
+					JSON.stringify({ postId, commentId, recipientId, linkUrl, target }),
+					now,
+				],
+			);
+		} catch {
+		}
+		return wantsJson
+			? json({ ok: true as const })
+			: redirect(`${currentUrl.pathname}${currentUrl.search}`);
 	}
 
 	if (intent === "setHidden") {
@@ -1490,6 +1631,36 @@ export default function PostDetailPage() {
 	const [busy, setBusy] = useState(false);
 	const [globalError, setGlobalError] = useState<string | null>(null);
 	const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
+	const messageFetcher = useFetcher<{ ok: boolean; error?: string }>();
+	const messageHandledRef = useRef(false);
+	const canSendAdminMessage = data.user?.role === "topadmin" || data.user?.role === "superadmin";
+	const safeSearch = useMemo(() => {
+		const params = new URLSearchParams(location.search);
+		params.delete("t");
+		const s = params.toString();
+		return s ? `?${s}` : "";
+	}, [location.search]);
+	type MessageDialogState =
+		| {
+				target: "post";
+				recipientId: number;
+				recipientName: string;
+				recipientRole: UserRole;
+				subject: string;
+				body: string;
+				linkPreview: string;
+			}
+		| {
+				target: "comment";
+				commentId: number;
+				recipientId: number;
+				recipientName: string;
+				recipientRole: UserRole;
+				subject: string;
+				body: string;
+				linkPreview: string;
+			};
+	const [messageDialog, setMessageDialog] = useState<MessageDialogState | null>(null);
 	const [postBannedState, setPostBannedState] = useState(() => Boolean(data.post.isBanned));
 	const [postBannedReason, setPostBannedReason] = useState<string | null>(() => data.post.bannedReason ?? null);
 	const [postBannedAt, setPostBannedAt] = useState<number | null>(() => (data.post.bannedAt ? Number(data.post.bannedAt) : null));
@@ -1512,6 +1683,24 @@ export default function PostDetailPage() {
 		const id = window.setTimeout(() => setGlobalSuccess(null), 2000);
 		return () => window.clearTimeout(id);
 	}, [globalSuccess]);
+
+	useEffect(() => {
+		if (messageFetcher.state === "submitting") {
+			messageHandledRef.current = false;
+			return;
+		}
+		if (messageFetcher.state !== "idle") return;
+		if (!messageFetcher.data) return;
+		if (messageHandledRef.current) return;
+		messageHandledRef.current = true;
+		if (messageFetcher.data.ok) {
+			setMessageDialog(null);
+			setGlobalSuccess("消息已发送");
+			setGlobalError(null);
+		} else {
+			setGlobalError(messageFetcher.data.error || "发送失败，请稍后重试");
+		}
+	}, [messageFetcher.data, messageFetcher.state]);
 
 	useEffect(() => {
 		if (!isAdminUser) return;
@@ -2641,6 +2830,25 @@ export default function PostDetailPage() {
 										</Form>
 									)
 								) : null}
+								{canSendAdminMessage && data.user && data.user.id !== data.post.authorId && canSendMessage(data.user.role, data.post.authorRole) ? (
+									<button
+										type="button"
+										onClick={() => {
+											setMessageDialog({
+												target: "post",
+												recipientId: data.post.authorId,
+												recipientName: data.post.authorName,
+												recipientRole: data.post.authorRole,
+												subject: "关于您的帖子通知",
+												body: "",
+												linkPreview: `[帖子：${data.post.title}](${data.siteOrigin}${location.pathname}${safeSearch})`,
+										});
+									}}
+									className="rounded border border-gray-300 px-3 py-1 text-sm font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+								>
+									✉️发送消息
+								</button>
+							) : null}
 								{data.user ? (
 									data.user.id !== data.post.authorId ? (
 										isBanned ? (
@@ -3284,6 +3492,7 @@ export default function PostDetailPage() {
 									return (
 										<li
 											key={comment.id}
+											id={`comment-${comment.id}`}
 											className={
 												shielded
 													? "rounded border border-red-200 bg-red-50/60 p-3 dark:border-red-900/40 dark:bg-red-900/10"
@@ -3364,7 +3573,7 @@ export default function PostDetailPage() {
 													<p className="text-gray-500 dark:text-gray-400">
 														<span>作者：{comment.authorName}</span>
 													</p>
-													<div className="flex flex-wrap items-center justify-end gap-2">
+												<div className="flex flex-wrap items-center justify-end gap-2">
 														{isOwner && !isBanned && !shielded ? (
 															<>
 																<button
@@ -3385,8 +3594,8 @@ export default function PostDetailPage() {
 																</button>
 															</>
 														) : null}
-														{isAdminUser ? (
-															<div className="flex items-center gap-2">
+													{isAdminUser ? (
+														<div className="flex items-center gap-2">
 																<button
 																	type="button"
 																	onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
@@ -3396,10 +3605,30 @@ export default function PostDetailPage() {
 																	{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
 																</button>
 																{showShieldPermissionDenied ? <span className="text-[11px] text-red-600">权限不足</span> : null}
-															</div>
-														) : null}
-										</div>
-									</div>
+														</div>
+													) : null}
+													{canSendAdminMessage && data.user && data.user.id !== comment.authorId && canSendMessage(data.user.role, comment.authorRole) ? (
+														<button
+															type="button"
+															onClick={() => {
+															setMessageDialog({
+																target: "comment",
+																commentId: comment.id,
+																recipientId: comment.authorId,
+																recipientName: comment.authorName,
+																recipientRole: comment.authorRole,
+																subject: "关于您的评论通知",
+																body: "",
+																linkPreview: `[评论：${data.post.title}](${data.siteOrigin}${location.pathname}${safeSearch}#comment-${comment.id})`,
+															});
+														}}
+														className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+													>
+														✉️发送消息
+													</button>
+												) : null}
+												</div>
+											</div>
 								</div>
 										{comment.attachments.length === 0 ? null : (
 											<ul className="mt-3 space-y-2">
@@ -3708,6 +3937,101 @@ export default function PostDetailPage() {
 							</p>
 						)}
 					</section>
+					{messageDialog ? (
+						<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+							<div className="w-full max-w-2xl rounded-xl bg-white p-5 shadow-lg dark:bg-gray-900">
+								<div className="flex items-start justify-between gap-4">
+									<div>
+										<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">发送消息</h2>
+										<p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+											收件人：{messageDialog.recipientName}
+										</p>
+									</div>
+									<button
+										type="button"
+										onClick={() => {
+											if (messageFetcher.state === "submitting") return;
+											setMessageDialog(null);
+									}}
+										disabled={messageFetcher.state === "submitting"}
+										className="rounded px-2 py-1 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-70 dark:text-gray-300 dark:hover:bg-gray-800"
+									>
+										取消
+									</button>
+								</div>
+								<messageFetcher.Form
+									method="post"
+									className="mt-4 flex flex-col gap-4"
+									onSubmit={(e) => {
+										if (messageFetcher.state === "submitting") e.preventDefault();
+									}}
+								>
+									<input type="hidden" name="intent" value="sendAdminMessage" />
+									<input type="hidden" name="wantsJson" value="1" />
+									<input type="hidden" name="target" value={messageDialog.target} />
+									{"commentId" in messageDialog ? <input type="hidden" name="commentId" value={String(messageDialog.commentId)} /> : null}
+									<div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+										<div className="flex flex-col gap-2">
+											<label className="text-sm font-medium text-gray-800 dark:text-gray-200">主题</label>
+											<input
+												name="subject"
+												value={messageDialog.subject}
+												onChange={(e) => setMessageDialog((prev) => (prev ? { ...prev, subject: e.target.value } : prev))}
+												disabled={messageFetcher.state === "submitting"}
+												className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+												maxLength={80}
+											/>
+										</div>
+										<div className="flex flex-col gap-2">
+											<label className="text-sm font-medium text-gray-800 dark:text-gray-200">内容链接（自动附加）</label>
+											<input
+												value={messageDialog.linkPreview}
+												disabled
+												className="w-full rounded border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+											/>
+										</div>
+									</div>
+									<div className="flex flex-col gap-2">
+										<label className="text-sm font-medium text-gray-800 dark:text-gray-200">正文</label>
+										<textarea
+											name="body"
+											rows={5}
+											value={messageDialog.body}
+											onChange={(e) => setMessageDialog((prev) => (prev ? { ...prev, body: e.target.value } : prev))}
+											disabled={messageFetcher.state === "submitting"}
+											maxLength={2000}
+											className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+											placeholder={`关于您发布的${messageDialog.target === "comment" ? "评论" : "帖子"}，管理员有以下通知：`}
+										/>
+										<div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+											<span>{messageDialog.body.trim().length}/2000</span>
+											<span>默认会自动附加链接</span>
+										</div>
+									</div>
+									<div className="flex items-center justify-end gap-2">
+										<button
+											type="submit"
+											disabled={messageFetcher.state === "submitting"}
+											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+										>
+											{messageFetcher.state === "submitting" ? "发送中..." : "发送"}
+										</button>
+										<button
+											type="button"
+											onClick={() => {
+												if (messageFetcher.state === "submitting") return;
+												setMessageDialog(null);
+											}}
+											disabled={messageFetcher.state === "submitting"}
+											className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-70 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+										>
+											取消
+										</button>
+									</div>
+								</messageFetcher.Form>
+							</div>
+						</div>
+					) : null}
 				</main>
 			</div>
 		</div>

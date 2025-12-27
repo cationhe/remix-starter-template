@@ -51,6 +51,33 @@ function parseId(value: FormDataEntryValue | null) {
 	return Math.floor(id);
 }
 
+function escapeHtml(text: string) {
+	return text
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;")
+		.replaceAll("'", "&#39;");
+}
+
+function renderMarkdownLinksToHtml(raw: string) {
+	const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+	let lastIndex = 0;
+	let html = "";
+	let has = false;
+	for (let match = pattern.exec(raw); match; match = pattern.exec(raw)) {
+		has = true;
+		html += escapeHtml(raw.slice(lastIndex, match.index));
+		const label = escapeHtml(match[1] || "链接");
+		const href = escapeHtml(match[2]);
+		html += `<a href="${href}" class="text-blue-600 underline hover:no-underline dark:text-blue-400">${label}</a>`;
+		lastIndex = match.index + match[0].length;
+	}
+	if (!has) return null;
+	html += escapeHtml(raw.slice(lastIndex));
+	return html.replaceAll("\n", "<br />");
+}
+
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
@@ -380,6 +407,8 @@ export default function MessagesPage() {
 								const unread = isRecipient && !m.readAt;
 								const pinned = Boolean((m as any).isPinned);
 								const important = Boolean((m as any).isImportant);
+								const adminMessage = m.senderRole === "admin" || m.senderRole === "superadmin" || m.senderRole === "topadmin";
+								const markdownHtml = !m.content.includes("<a ") && !m.content.includes("<span ") ? renderMarkdownLinksToHtml(m.content) : null;
 								return (
 									<li
 										key={m.id}
@@ -409,24 +438,31 @@ export default function MessagesPage() {
 															置顶
 														</span>
 													) : null}
-													{important ? (
-														<span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-200">
-															重要
-														</span>
-													) : null}
-													{unread ? (
-														<span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-200">
-															未读
-														</span>
-													) : null}
-												</div>
-												<p className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-800 dark:text-gray-200">
-													{m.content.includes("<a ") || m.content.includes("<span ") ? (
-														<span dangerouslySetInnerHTML={{ __html: m.content }} />
-													) : (
-														m.content
-													)}
-												</p>
+											{important ? (
+												<span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-200">
+													重要
+												</span>
+											) : null}
+											{adminMessage && isRecipient ? (
+												<span className="rounded bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-200">
+													管理员
+												</span>
+											) : null}
+											{unread ? (
+												<span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-200">
+													未读
+												</span>
+											) : null}
+										</div>
+										<p className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-800 dark:text-gray-200">
+											{m.content.includes("<a ") || m.content.includes("<span ") ? (
+												<span dangerouslySetInnerHTML={{ __html: m.content }} />
+											) : markdownHtml ? (
+												<span dangerouslySetInnerHTML={{ __html: markdownHtml }} />
+											) : (
+												m.content
+											)}
+										</p>
 												<div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
 													{new Date(m.createdAt).toLocaleString()}
 													{isRecipient ? (
