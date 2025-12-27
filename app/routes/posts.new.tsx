@@ -11,6 +11,7 @@ type AreaListItem = {
 };
 
 type LoaderData = {
+	me: { id: number; role: string };
 	areas: AreaListItem[];
 };
 
@@ -39,7 +40,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 			? "SELECT id as id, name as name, is_hidden as isHidden FROM discussion_areas ORDER BY sort_order ASC, id ASC"
 			: "SELECT id as id, name as name, is_hidden as isHidden FROM discussion_areas WHERE is_hidden = 0 ORDER BY sort_order ASC, id ASC",
 	);
-	return json<LoaderData>({ areas });
+	return json<LoaderData>({ me: { id: user.id, role: user.role }, areas });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -51,6 +52,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
 	const areaIdRaw = String(formData.get("areaId") || "").trim();
 	const trimmedTitle = title.trim();
 	const trimmedContent = content.trim();
+	const wantsHiddenPost = String(formData.get("isHiddenPost") || "").trim() === "1";
+	if (wantsHiddenPost && user.role !== "topadmin") {
+		return json<ActionData>({ fields: { areaId: areaIdRaw, title, content }, formError: "只有站点管理员可以创建隐藏帖子" }, { status: 403 });
+	}
 	const areaId = Number(areaIdRaw);
 	const fields: ActionData["fields"] = {
 		areaId: areaIdRaw,
@@ -88,11 +93,19 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			return json<ActionData>({ fields, formError: quota.message }, { status: quota.status });
 		}
 		const createdAt = Date.now();
-		await execute(
-			db,
-			"INSERT INTO posts (title, content, author_id, created_at, area_id) VALUES (?, ?, ?, ?, ?)",
-			[trimmedTitle, trimmedContent, user.id, createdAt, area.id],
-		);
+		if (wantsHiddenPost) {
+			await execute(
+				db,
+				"INSERT INTO posts (title, content, author_id, created_at, area_id, is_hidden, hidden_at, hidden_by, invited_users) VALUES (?, ?, ?, ?, ?, 1, ?, ?, '[]')",
+				[trimmedTitle, trimmedContent, user.id, createdAt, area.id, createdAt, user.id],
+			);
+		} else {
+			await execute(
+				db,
+				"INSERT INTO posts (title, content, author_id, created_at, area_id) VALUES (?, ?, ?, ?, ?)",
+				[trimmedTitle, trimmedContent, user.id, createdAt, area.id],
+			);
+		}
 		return redirect("/posts");
 	} catch (error) {
 		return json<ActionData>({ fields, formError: "发帖失败，请稍后重试" }, { status: 500 });
@@ -107,6 +120,7 @@ export default function NewPost() {
 	const hasAreas = loaderData.areas.length > 0;
 	const fallbackAreaId = hasAreas ? String(loaderData.areas[0].id) : "";
 	const selectedAreaId = actionData?.fields?.areaId && actionData.fields.areaId !== "" ? actionData.fields.areaId : fallbackAreaId;
+	const canCreateHidden = loaderData.me.role === "topadmin";
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-gray-50 px-4 py-8 dark:bg-gray-900">
 			<div className="w-full max-w-2xl rounded-xl bg-white p-8 shadow dark:bg-gray-800">
@@ -169,6 +183,14 @@ export default function NewPost() {
 							<p className="mt-1 text-xs text-red-600">{actionData.fieldErrors.content}</p>
 						) : null}
 					</div>
+					{canCreateHidden ? (
+						<div className="flex items-center gap-2">
+							<input id="isHiddenPost" name="isHiddenPost" type="checkbox" value="1" className="h-4 w-4" />
+							<label htmlFor="isHiddenPost" className="text-sm text-gray-700 dark:text-gray-200">
+								创建为隐藏帖子（仅受邀用户可通过链接访问）
+							</label>
+						</div>
+					) : null}
 					{actionData?.formError ? (
 						<p className="text-sm text-red-600">{actionData.formError}</p>
 					) : null}

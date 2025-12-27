@@ -378,8 +378,19 @@ export default function MessagesPage() {
 							{data.messages.map((m) => {
 								const isRecipient = m.recipientId === data.me.id;
 								const unread = isRecipient && !m.readAt;
+								const pinned = Boolean((m as any).isPinned);
+								const important = Boolean((m as any).isImportant);
 								return (
-									<li key={m.id} className={unread ? "bg-amber-50/60 px-6 py-4 dark:bg-amber-900/10" : "px-6 py-4"}>
+									<li
+										key={m.id}
+										className={
+											pinned
+												? "bg-blue-50/60 px-6 py-4 dark:bg-blue-900/10"
+												: unread
+													? "bg-amber-50/60 px-6 py-4 dark:bg-amber-900/10"
+													: "px-6 py-4"
+										}
+									>
 										<div className="flex items-start gap-3">
 											<input
 												type="checkbox"
@@ -393,6 +404,16 @@ export default function MessagesPage() {
 													<span className="text-sm font-medium text-gray-900 dark:text-gray-100">
 														{m.senderName} → {m.recipientName}
 													</span>
+													{pinned ? (
+														<span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-200">
+															置顶
+														</span>
+													) : null}
+													{important ? (
+														<span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-200">
+															重要
+														</span>
+													) : null}
 													{unread ? (
 														<span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-200">
 															未读

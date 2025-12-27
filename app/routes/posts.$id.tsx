@@ -29,6 +29,13 @@ import type { AttachmentRecord, CommentAttachmentRecord } from "~/lib/attachment
 import { splitPostContentParts } from "~/lib/post-content";
 import { sendMessage } from "~/lib/messages.server";
 import { removeAllPostImagesForPost } from "~/lib/post-images.server";
+import {
+	ensureHiddenPostReadable,
+	inviteUsersToHiddenPost,
+	issueHiddenPostAccessToken,
+	listHiddenPostInvites,
+	isUserInvitedToHiddenPost,
+} from "~/lib/hidden-posts.server";
 
 const attachmentLimits = {
 	MIN_FILE_SIZE_BYTES: 10,
@@ -51,6 +58,9 @@ type PostDetail = {
 	authorId: number;
 	authorName: string;
 	updatedByName: string | null;
+	isHidden: number;
+	hiddenAt: number | null;
+	hiddenBy: number | null;
 	isBanned: number;
 	bannedAt: number | null;
 	bannedBy: number | null;
@@ -94,6 +104,7 @@ type CommentItem = {
 type LoaderData = {
 	user: Awaited<ReturnType<typeof findUserById>>;
 	post: PostDetail;
+	hiddenInvites: Awaited<ReturnType<typeof listHiddenPostInvites>> | null;
 	attachments: AttachmentRecord[];
 	attachmentStorage: {
 		usedBytes: number;
@@ -144,23 +155,31 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	}
 	const db = getDBFromContext(context);
 	let postRow: PostDetailRow | null = null;
-	try {
-		postRow = await queryOne<PostDetailRow>(
-			db,
-			"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
-			[id],
-		);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : "";
-		if (message.includes("no such column") && message.includes("updated_by")) {
-			postRow = await queryOne<PostDetailRow>(
-				db,
-				"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL",
-				[id],
-			);
-		} else {
+	const sqlFull =
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+	const sqlNoUpdatedBy =
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, posts.is_hidden as isHidden, posts.hidden_at as hiddenAt, posts.hidden_by as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+	const sqlNoHidden =
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, posts.updated_by as updatedBy, posts.author_id as authorId, users.display_name as authorName, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+	const sqlNoUpdatedNoHidden =
+		"SELECT posts.id as id, posts.title as title, posts.content as content, posts.created_at as createdAt, posts.updated_at as updatedAt, NULL as updatedBy, posts.author_id as authorId, users.display_name as authorName, 0 as isHidden, NULL as hiddenAt, NULL as hiddenBy, posts.is_banned as isBanned, posts.banned_at as bannedAt, posts.banned_by as bannedBy, posts.banned_reason as bannedReason, posts.pinned_until_ms as pinnedUntilMs, posts.pinned_at as pinnedAt, posts.pinned_by as pinnedBy FROM posts JOIN users ON posts.author_id = users.id WHERE posts.id = ? AND posts.deleted_at IS NULL";
+	const candidates = [sqlFull, sqlNoUpdatedBy, sqlNoHidden, sqlNoUpdatedNoHidden];
+	let lastError: unknown = null;
+	for (const sql of candidates) {
+		try {
+			postRow = await queryOne<PostDetailRow>(db, sql, [id]);
+			break;
+		} catch (error) {
+			lastError = error;
+			const message = error instanceof Error ? error.message : "";
+			if (message.includes("no such column")) {
+				continue;
+			}
 			throw error;
 		}
+	}
+	if (!postRow && lastError) {
+		throw lastError;
 	}
 	if (!postRow) {
 		throw new Response("帖子不存在", { status: 404 });
@@ -176,6 +195,18 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		updatedByName = row?.displayName ?? null;
 	}
 	const post: PostDetail = { ...postRow, updatedByName };
+
+	let accessHeaders: HeadersInit | undefined = undefined;
+	const canBypassHidden = user?.role === "topadmin" || user?.role === "superadmin" || user?.id === post.authorId;
+	if (post.isHidden && !canBypassHidden) {
+		const access = await ensureHiddenPostReadable({ request, context, postId: id, isHidden: true, user });
+		accessHeaders = access.headers;
+	}
+
+	const hiddenInvites =
+		post.isHidden && (user?.role === "topadmin" || user?.role === "superadmin")
+			? await listHiddenPostInvites(context, id)
+			: null;
 
 	const commentCountRow = await queryOne<{ count: number | string }>(
 		db,
@@ -282,9 +313,11 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		}
 	}
 
-	return json<LoaderData>({
+	return json<LoaderData>(
+		{
 		user,
 		post,
+		hiddenInvites,
 		attachments,
 		attachmentStorage,
 		postEdits,
@@ -295,7 +328,9 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		page,
 		pageSize,
 		totalPages,
-	});
+		},
+		accessHeaders ? { headers: accessHeaders } : undefined,
+	);
 }
 
 export async function action({ request, context, params }: ActionFunctionArgs) {
@@ -314,6 +349,161 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 	const wantsJson = Boolean(request.headers.get("Accept")?.includes("application/json"));
 	const ip = getClientIp(request);
 	const userAgent = request.headers.get("User-Agent");
+
+	let postAccess: { authorId: number; isHidden: number } | null = null;
+	try {
+		postAccess = await queryOne<{ authorId: number; isHidden: number }>(
+			db,
+			"SELECT author_id as authorId, is_hidden as isHidden FROM posts WHERE id = ? AND deleted_at IS NULL",
+			[postId],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && message.includes("is_hidden")) {
+			postAccess = await queryOne<{ authorId: number; isHidden: number }>(
+				db,
+				"SELECT author_id as authorId, 0 as isHidden FROM posts WHERE id = ? AND deleted_at IS NULL",
+				[postId],
+			);
+		} else {
+			throw error;
+		}
+	}
+	if (!postAccess) {
+		return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+	}
+	const isHiddenPost = Boolean(postAccess.isHidden);
+	const canBypassHidden = user.role === "topadmin" || user.role === "superadmin" || userId === postAccess.authorId;
+	if (isHiddenPost && !canBypassHidden) {
+		const invited = await isUserInvitedToHiddenPost(context, postId, userId);
+		if (!invited) {
+			return json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+	}
+
+	if (intent === "setHidden") {
+		if (user.role !== "topadmin") {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_hidden_set_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "只有站点管理员可以设置隐藏帖子" }, { status: 403 });
+		}
+		const mode = String(formData.get("mode") || "");
+		const now = Date.now();
+		if (mode === "hide") {
+			await execute(
+				db,
+				"UPDATE posts SET is_hidden = 1, hidden_at = ?, hidden_by = ? WHERE id = ? AND deleted_at IS NULL",
+				[now, userId, postId],
+			);
+		} else if (mode === "unhide") {
+			await execute(
+				db,
+				"UPDATE posts SET is_hidden = 0, hidden_at = NULL, hidden_by = NULL WHERE id = ? AND deleted_at IS NULL",
+				[postId],
+			);
+		} else {
+			return json<ActionData>({ formError: "无效的隐藏操作" }, { status: 400 });
+		}
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[userId, "post_hidden_set", ip, userAgent, JSON.stringify({ postId, mode }), now],
+			);
+		} catch {
+		}
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "inviteHiddenUsers") {
+		if (user.role !== "topadmin") {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "hidden_post_invite_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return json<ActionData>({ formError: "只有站点管理员可以邀请用户参与隐藏帖子" }, { status: 403 });
+		}
+		if (!isHiddenPost) {
+			return json<ActionData>({ formError: "该帖子不是隐藏帖子" }, { status: 400 });
+		}
+		const raw = String(formData.get("inviteUserIds") || "").trim();
+		if (!raw) {
+			return json<ActionData>({ formError: "请输入要邀请的用户ID" }, { status: 400 });
+		}
+		const parsed = raw
+			.split(/[，,\s]+/)
+			.map((s) => Number(String(s).trim()))
+			.filter((n) => Number.isFinite(n) && n > 0)
+			.map((n) => Math.floor(n));
+		const inviteIds = Array.from(new Set(parsed)).filter((n) => n !== userId);
+		if (inviteIds.length === 0) {
+			return json<ActionData>({ formError: "没有可邀请的用户ID" }, { status: 400 });
+		}
+		if (inviteIds.length > 50) {
+			return json<ActionData>({ formError: "一次最多邀请 50 个用户" }, { status: 400 });
+		}
+
+		const placeholders = inviteIds.map(() => "?").join(",");
+		const userRows = await queryAll<{ id: number; displayName: string; role: string }>(
+			db,
+			`SELECT id as id, display_name as displayName, role as role FROM users WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+			inviteIds,
+		);
+		const allowed = userRows.filter((u) => u.role === "user" || u.role === "admin");
+		if (allowed.length === 0) {
+			return json<ActionData>({ formError: "未找到可邀请的用户（仅支持邀请 admin/user）" }, { status: 400 });
+		}
+		const allowedIds = allowed.map((u) => u.id);
+		const now = Date.now();
+		const result = await inviteUsersToHiddenPost(context, { postId, invitedBy: userId, invitedUserIds: allowedIds, now });
+
+		const postTitleRow = await queryOne<{ title: string }>(
+			db,
+			"SELECT title as title FROM posts WHERE id = ? AND deleted_at IS NULL",
+			[postId],
+		);
+		const postTitle = postTitleRow?.title ?? `帖子#${postId}`;
+		const origin = currentUrl.origin;
+		for (const invitedUserId of result.inserted) {
+			const token = await issueHiddenPostAccessToken(context, { postId, userId: invitedUserId, issuedBy: userId, now });
+			const link = `${origin}/posts/${postId}?t=${encodeURIComponent(token.token)}`;
+			const text =
+				"【系统通知】你被邀请参与隐藏帖子讨论\n" +
+				`帖子：${postTitle}\n` +
+				`邀请人：${user.displayName}（ID: ${userId}）\n` +
+				`邀请时间：${new Date(now).toLocaleString()}\n` +
+				`访问链接：${link}\n\n` +
+				"注意：该链接为一次性访问令牌，请勿转发。";
+			await sendMessage(context, { sender: user, recipientId: invitedUserId, content: text, isPinned: true, isImportant: true });
+		}
+
+		try {
+			await execute(
+				db,
+				"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				[
+					userId,
+					"hidden_post_invited",
+					ip,
+					userAgent,
+					JSON.stringify({ postId, invitedUserIds: allowedIds, inserted: result.inserted, skipped: result.skipped }),
+					now,
+				],
+			);
+		} catch {
+		}
+		return redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
 
 	if (intent === "banPost") {
 		assertAdmin(user);
@@ -1039,9 +1229,6 @@ export default function PostDetailPage() {
 	const revalidator = useRevalidator();
 	const location = useLocation();
 	const isEditRoute = /\/edit\/?$/.test(location.pathname);
-	if (isEditRoute) {
-		return <Outlet />;
-	}
 	const isSubmitting = navigation.state === "submitting";
 	const isBanned = Boolean(data.user?.isBanned);
 	const postPinned =
@@ -1051,6 +1238,7 @@ export default function PostDetailPage() {
 		data.user && (data.user.role === "admin" || data.user.role === "superadmin" || data.user.role === "topadmin"),
 	);
 	const isSuperadminUser = data.user?.role === "superadmin" || data.user?.role === "topadmin";
+	const isTopadminUser = data.user?.role === "topadmin";
 	const commentStartIndex = (data.page - 1) * data.pageSize;
 	const canPrev = data.page > 1;
 	const canNext = data.page < data.totalPages;
@@ -2135,6 +2323,9 @@ export default function PostDetailPage() {
 		}
 	}
 
+	if (isEditRoute) {
+		return <Outlet />;
+	}
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
 			<div className="mx-auto flex max-w-3xl flex-col gap-6">
@@ -2150,14 +2341,19 @@ export default function PostDetailPage() {
 									置顶
 								</span>
 							) : null}
-							{postBanned ? (
-								<span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-200">
-									已封禁
-								</span>
-							) : null}
-							<span className="ml-3">
-								发布时间：{new Date(data.post.createdAt).toLocaleString()}
+						{postBanned ? (
+							<span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-200">
+								已封禁
 							</span>
+						) : null}
+						{data.post.isHidden ? (
+							<span className="ml-2 rounded bg-gray-200 px-2 py-0.5 text-gray-700 dark:bg-gray-700 dark:text-gray-100">
+								隐藏帖
+							</span>
+						) : null}
+						<span className="ml-3">
+							发布时间：{new Date(data.post.createdAt).toLocaleString()}
+						</span>
 							{data.post.updatedAt ? (
 								<span className="ml-3">
 									最后修改：{new Date(data.post.updatedAt).toLocaleString()}
@@ -2279,6 +2475,83 @@ export default function PostDetailPage() {
 							<div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-700 dark:bg-gray-900/30">
 								<div className="mb-2 text-sm font-medium text-gray-900 dark:text-gray-100">管理操作</div>
 								<div className="flex flex-col gap-3">
+									{isTopadminUser ? (
+										<div className="flex flex-col gap-2">
+											<div className="flex flex-wrap items-center gap-2">
+												<Form
+													method="post"
+													onSubmit={(e) => {
+														const next = data.post.isHidden ? "取消隐藏" : "设为隐藏";
+														const ok = window.confirm(`确认${next}该帖子吗？`);
+														if (!ok) e.preventDefault();
+													}}
+												>
+													<input type="hidden" name="intent" value="setHidden" />
+													<input type="hidden" name="mode" value={data.post.isHidden ? "unhide" : "hide"} />
+													<button
+														type="submit"
+														className={
+															data.post.isHidden
+																? "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
+																: "rounded bg-purple-700 px-3 py-1 text-sm font-medium text-white hover:bg-purple-800"
+													}
+													>
+														{data.post.isHidden ? "取消隐藏" : "设为隐藏"}
+													</button>
+												</Form>
+												{data.post.isHidden ? (
+													<span className="text-xs text-gray-500 dark:text-gray-400">
+														受邀用户仅能通过一次性链接进入，进入后会在会话中缓存权限。
+													</span>
+												) : null}
+											</div>
+											{data.post.isHidden ? (
+												<div className="rounded border border-gray-200 bg-white p-3 text-sm dark:border-gray-700 dark:bg-gray-800">
+													<div className="flex flex-wrap items-center justify-between gap-2">
+														<div className="font-medium text-gray-900 dark:text-gray-100">受邀用户</div>
+														<span className="text-xs text-gray-500 dark:text-gray-400">
+															{Array.isArray(data.hiddenInvites) ? `共 ${data.hiddenInvites.length} 条邀请记录` : ""}
+													</span>
+												</div>
+												{Array.isArray(data.hiddenInvites) && data.hiddenInvites.length > 0 ? (
+													<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+														{data.hiddenInvites.map((inv) => (
+															<li key={`${inv.postId}_${inv.invitedUserId}_${inv.invitedAt}`} className="flex flex-wrap items-center gap-2">
+																<span className="font-medium">{inv.invitedUserName}</span>
+																<span className="text-gray-500 dark:text-gray-400">（ID: {inv.invitedUserId}）</span>
+																{inv.revokedAt ? (
+																	<span className="rounded bg-gray-200 px-2 py-0.5 text-gray-700 dark:bg-gray-700 dark:text-gray-100">已撤销</span>
+																) : inv.acceptedAt ? (
+																	<span className="rounded bg-green-100 px-2 py-0.5 text-green-700 dark:bg-green-900/30 dark:text-green-200">已进入</span>
+																) : (
+																	<span className="rounded bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">未进入</span>
+																)}
+																<span className="text-gray-500 dark:text-gray-400">邀请时间：{new Date(inv.invitedAt).toLocaleString()}</span>
+															</li>
+														))}
+													</ul>
+												) : (
+													<p className="mt-2 text-xs text-gray-500 dark:text-gray-400">暂无邀请记录。</p>
+												)}
+												<Form method="post" className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+													<input type="hidden" name="intent" value="inviteHiddenUsers" />
+													<div className="flex-1">
+														<label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">邀请用户ID</label>
+														<input
+															name="inviteUserIds"
+															maxLength={2000}
+															className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+															placeholder="例如：12, 35, 80（用逗号或空格分隔）"
+														/>
+													</div>
+													<button type="submit" className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+														发送邀请
+													</button>
+												</Form>
+											</div>
+										) : null}
+									</div>
+								) : null}
 									{postBanned ? (
 										<div className="flex flex-wrap items-center gap-2">
 											{isSuperadminUser ? (

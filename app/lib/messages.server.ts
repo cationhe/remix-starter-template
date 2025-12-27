@@ -12,6 +12,9 @@ export type MessageListItem = {
 	recipientRole: UserRole;
 	content: string;
 	createdAt: number;
+	isPinned: number;
+	pinnedAt: number | null;
+	isImportant: number;
 	readAt: number | null;
 };
 
@@ -78,27 +81,61 @@ export async function countMessagesForUser(context: AppLoadContext, userId: numb
 export async function listMessagesForUser(context: AppLoadContext, userId: number, page: number, pageSize: number) {
 	const db = getDBFromContext(context);
 	const offset = (page - 1) * pageSize;
-	const rows = await queryAll<MessageListItem>(
-		db,
-		`SELECT
-		  m.id as id,
-		  m.sender_id as senderId,
-		  s.display_name as senderName,
-		  s.role as senderRole,
-		  m.recipient_id as recipientId,
-		  r.display_name as recipientName,
-		  r.role as recipientRole,
-		  m.content as content,
-		  m.created_at as createdAt,
-		  m.read_at as readAt
-		FROM messages m
-		JOIN users s ON m.sender_id = s.id
-		JOIN users r ON m.recipient_id = r.id
-		WHERE m.sender_id = ? OR m.recipient_id = ?
-		ORDER BY m.created_at DESC
-		LIMIT ? OFFSET ?`,
-		[userId, userId, pageSize, offset],
-	);
+	let rows: MessageListItem[] = [];
+	try {
+		rows = await queryAll<MessageListItem>(
+			db,
+			`SELECT
+			  m.id as id,
+			  m.sender_id as senderId,
+			  s.display_name as senderName,
+			  s.role as senderRole,
+			  m.recipient_id as recipientId,
+			  r.display_name as recipientName,
+			  r.role as recipientRole,
+			  m.content as content,
+			  m.created_at as createdAt,
+			  m.is_pinned as isPinned,
+			  m.pinned_at as pinnedAt,
+			  m.is_important as isImportant,
+			  m.read_at as readAt
+			FROM messages m
+			JOIN users s ON m.sender_id = s.id
+			JOIN users r ON m.recipient_id = r.id
+			WHERE m.sender_id = ? OR m.recipient_id = ?
+			ORDER BY m.is_pinned DESC, m.pinned_at DESC, m.created_at DESC
+			LIMIT ? OFFSET ?`,
+			[userId, userId, pageSize, offset],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && (message.includes("is_pinned") || message.includes("is_important"))) {
+			const fallback = await queryAll<Omit<MessageListItem, "isPinned" | "pinnedAt" | "isImportant">>(
+				db,
+				`SELECT
+				  m.id as id,
+				  m.sender_id as senderId,
+				  s.display_name as senderName,
+				  s.role as senderRole,
+				  m.recipient_id as recipientId,
+				  r.display_name as recipientName,
+				  r.role as recipientRole,
+				  m.content as content,
+				  m.created_at as createdAt,
+				  m.read_at as readAt
+				FROM messages m
+				JOIN users s ON m.sender_id = s.id
+				JOIN users r ON m.recipient_id = r.id
+				WHERE m.sender_id = ? OR m.recipient_id = ?
+				ORDER BY m.created_at DESC
+				LIMIT ? OFFSET ?`,
+				[userId, userId, pageSize, offset],
+			);
+			rows = fallback.map((m) => ({ ...m, isPinned: 0, pinnedAt: null, isImportant: 0 }));
+		} else {
+			throw error;
+		}
+	}
 	return rows.map((m) => ({
 		...m,
 		senderRole: m.senderRole as UserRole,
@@ -119,7 +156,10 @@ export async function findRecipientById(context: AppLoadContext, userId: number)
 	return { id: row.id, role, displayName: row.displayName };
 }
 
-export async function sendMessage(context: AppLoadContext, args: { sender: AuthUser; recipientId: number; content: string }) {
+export async function sendMessage(
+	context: AppLoadContext,
+	args: { sender: AuthUser; recipientId: number; content: string; isPinned?: boolean; isImportant?: boolean },
+) {
 	const recipient = await findRecipientById(context, args.recipientId);
 	if (!recipient) {
 		return { ok: false as const, error: "收件人不存在" };
@@ -139,11 +179,28 @@ export async function sendMessage(context: AppLoadContext, args: { sender: AuthU
 	}
 
 	const db = getDBFromContext(context);
-	await execute(
-		db,
-		"INSERT INTO messages (sender_id, recipient_id, content, created_at, read_at) VALUES (?, ?, ?, ?, NULL)",
-		[args.sender.id, recipient.id, trimmed, Date.now()],
-	);
+	const now = Date.now();
+	const isPinned = args.isPinned ? 1 : 0;
+	const pinnedAt = isPinned ? now : null;
+	const isImportant = args.isImportant ? 1 : 0;
+	try {
+		await execute(
+			db,
+			"INSERT INTO messages (sender_id, recipient_id, content, created_at, read_at, is_pinned, pinned_at, is_important) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+			[args.sender.id, recipient.id, trimmed, now, isPinned, pinnedAt, isImportant],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && (message.includes("is_pinned") || message.includes("is_important"))) {
+			await execute(
+				db,
+				"INSERT INTO messages (sender_id, recipient_id, content, created_at, read_at) VALUES (?, ?, ?, ?, NULL)",
+				[args.sender.id, recipient.id, trimmed, now],
+			);
+		} else {
+			throw error;
+		}
+	}
 	return { ok: true as const };
 }
 

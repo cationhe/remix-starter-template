@@ -102,6 +102,9 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	const requestedPage = parsePositiveInt(url.searchParams.get("page")) ?? 1;
 	const where: string[] = ["p.area_id = ?", "p.deleted_at IS NULL"];
 	const whereArgs: Array<string | number> = [areaId];
+	if (!canSeeHidden) {
+		where.push("p.is_hidden = 0");
+	}
 	if (q) {
 		where.push("(p.title LIKE ? OR p.content LIKE ?)");
 		const pattern = `%${q}%`;
@@ -109,11 +112,20 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 	}
 	const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
-	const countRow = await queryOne<{ count: number | string }>(
-		db,
-		`SELECT COUNT(1) as count FROM posts p ${whereSql}`,
-		whereArgs,
-	);
+	let countRow: { count: number | string } | null = null;
+	try {
+		countRow = await queryOne<{ count: number | string }>(db, `SELECT COUNT(1) as count FROM posts p ${whereSql}`, whereArgs);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && message.includes("is_hidden")) {
+			const fallbackWhere = where.filter((w) => w !== "p.is_hidden = 0");
+			const fallbackArgs = whereArgs;
+			const fallbackSql = fallbackWhere.length > 0 ? `WHERE ${fallbackWhere.join(" AND ")}` : "";
+			countRow = await queryOne<{ count: number | string }>(db, `SELECT COUNT(1) as count FROM posts p ${fallbackSql}`, fallbackArgs);
+		} else {
+			throw error;
+		}
+	}
 	const totalCount = Number(countRow?.count ?? 0);
 	const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 	if (requestedPage > totalPages) {
@@ -133,25 +145,55 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 		pinnedUntilMs: number | null;
 		pinnedAt: number | null;
 	};
-	const rows = await queryAll<PostDbRow>(
-		db,
-		`SELECT p.id as id,
-		        p.title as title,
-		        p.content as content,
-		        p.created_at as createdAt,
-		        u.display_name as authorName,
-		        p.is_banned as isBanned,
-		        p.pinned_until_ms as pinnedUntilMs,
-		        p.pinned_at as pinnedAt
-		 FROM posts p
-		 JOIN users u ON p.author_id = u.id
-		 ${whereSql}
-		 ORDER BY (CASE WHEN p.pinned_until_ms = 0 OR p.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC,
-		          p.pinned_at DESC,
-		          p.created_at DESC
-		 LIMIT ? OFFSET ?`,
-		[...whereArgs, now, pageSize, offset],
-	);
+	let rows: PostDbRow[] = [];
+	try {
+		rows = await queryAll<PostDbRow>(
+			db,
+			`SELECT p.id as id,
+			        p.title as title,
+			        p.content as content,
+			        p.created_at as createdAt,
+			        u.display_name as authorName,
+			        p.is_banned as isBanned,
+			        p.pinned_until_ms as pinnedUntilMs,
+			        p.pinned_at as pinnedAt
+			 FROM posts p
+			 JOIN users u ON p.author_id = u.id
+			 ${whereSql}
+			 ORDER BY (CASE WHEN p.pinned_until_ms = 0 OR p.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC,
+			          p.pinned_at DESC,
+			          p.created_at DESC
+			 LIMIT ? OFFSET ?`,
+			[...whereArgs, now, pageSize, offset],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && message.includes("is_hidden")) {
+			const fallbackWhere = where.filter((w) => w !== "p.is_hidden = 0");
+			const fallbackSql = fallbackWhere.length > 0 ? `WHERE ${fallbackWhere.join(" AND ")}` : "";
+			rows = await queryAll<PostDbRow>(
+				db,
+				`SELECT p.id as id,
+				        p.title as title,
+				        p.content as content,
+				        p.created_at as createdAt,
+				        u.display_name as authorName,
+				        p.is_banned as isBanned,
+				        p.pinned_until_ms as pinnedUntilMs,
+				        p.pinned_at as pinnedAt
+				 FROM posts p
+				 JOIN users u ON p.author_id = u.id
+				 ${fallbackSql}
+				 ORDER BY (CASE WHEN p.pinned_until_ms = 0 OR p.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC,
+				          p.pinned_at DESC,
+				          p.created_at DESC
+				 LIMIT ? OFFSET ?`,
+				[...whereArgs, now, pageSize, offset],
+			);
+		} else {
+			throw error;
+		}
+	}
 	const posts: PostListItem[] = rows.map((r: PostDbRow) => {
 		const text = String(r.content ?? "")
 			.replace(/\s+/g, " ")

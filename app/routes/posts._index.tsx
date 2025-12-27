@@ -45,30 +45,64 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		db,
 		"SELECT id as id, name as name, sort_order as sortOrder, is_hidden as isHidden FROM discussion_areas ORDER BY sort_order ASC, id ASC",
 	);
-	const topPosts = await queryAll<PostListItem & { rn: number }>(
-		db,
-		`SELECT id, title, createdAt, authorName, isBanned, pinnedUntilMs, areaId
-		 FROM (
-			SELECT p.id as id,
-			       p.title as title,
-			       p.created_at as createdAt,
-			       u.display_name as authorName,
-			       p.is_banned as isBanned,
-			       p.pinned_until_ms as pinnedUntilMs,
-			       p.area_id as areaId,
-			       ROW_NUMBER() OVER (
-				PARTITION BY p.area_id
-				ORDER BY (CASE WHEN p.pinned_until_ms = 0 OR p.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC,
-				         p.pinned_at DESC,
-				         p.created_at DESC
-			       ) as rn
-			FROM posts p
-			JOIN users u ON p.author_id = u.id
-			WHERE p.deleted_at IS NULL
-		 )
-		 WHERE rn <= 5`,
-		[now],
-	);
+	let topPosts: (PostListItem & { rn: number })[] = [];
+	try {
+		topPosts = await queryAll<PostListItem & { rn: number }>(
+			db,
+			`SELECT id, title, createdAt, authorName, isBanned, pinnedUntilMs, areaId
+			 FROM (
+				SELECT p.id as id,
+				       p.title as title,
+				       p.created_at as createdAt,
+				       u.display_name as authorName,
+				       p.is_banned as isBanned,
+				       p.pinned_until_ms as pinnedUntilMs,
+				       p.area_id as areaId,
+				       ROW_NUMBER() OVER (
+					PARTITION BY p.area_id
+					ORDER BY (CASE WHEN p.pinned_until_ms = 0 OR p.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC,
+					         p.pinned_at DESC,
+					         p.created_at DESC
+				       ) as rn
+				FROM posts p
+				JOIN users u ON p.author_id = u.id
+				WHERE p.deleted_at IS NULL
+				  AND (? = 1 OR p.is_hidden = 0)
+			 )
+			 WHERE rn <= 5`,
+			[now, canSeeHidden ? 1 : 0],
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "";
+		if (message.includes("no such column") && message.includes("is_hidden")) {
+			topPosts = await queryAll<PostListItem & { rn: number }>(
+				db,
+				`SELECT id, title, createdAt, authorName, isBanned, pinnedUntilMs, areaId
+				 FROM (
+					SELECT p.id as id,
+					       p.title as title,
+					       p.created_at as createdAt,
+					       u.display_name as authorName,
+					       p.is_banned as isBanned,
+					       p.pinned_until_ms as pinnedUntilMs,
+					       p.area_id as areaId,
+					       ROW_NUMBER() OVER (
+						PARTITION BY p.area_id
+						ORDER BY (CASE WHEN p.pinned_until_ms = 0 OR p.pinned_until_ms > ? THEN 1 ELSE 0 END) DESC,
+						         p.pinned_at DESC,
+						         p.created_at DESC
+					       ) as rn
+					FROM posts p
+					JOIN users u ON p.author_id = u.id
+					WHERE p.deleted_at IS NULL
+				 )
+				 WHERE rn <= 5`,
+				[now],
+			);
+		} else {
+			throw error;
+		}
+	}
 	const byArea = new Map<number, PostListItem[]>();
 	for (const row of topPosts) {
 		const list = byArea.get(row.areaId) ?? [];
