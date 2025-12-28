@@ -212,6 +212,15 @@ export async function action({ request, context }: ActionFunctionArgs) {
 			const delPlaceholders = deletableIds.map(() => "?").join(",");
 			await execute(db, `DELETE FROM post_likes WHERE post_id IN (${delPlaceholders})`, deletableIds);
 			await execute(db, `DELETE FROM comments WHERE post_id IN (${delPlaceholders})`, deletableIds);
+			try {
+				await execute(db, `DELETE FROM post_edits WHERE post_id IN (${delPlaceholders})`, deletableIds);
+			} catch {
+			}
+			try {
+				await execute(db, `DELETE FROM hidden_post_invites WHERE post_id IN (${delPlaceholders})`, deletableIds);
+				await execute(db, `DELETE FROM hidden_post_access_tokens WHERE post_id IN (${delPlaceholders})`, deletableIds);
+			} catch {
+			}
 			await execute(db, `DELETE FROM posts WHERE id IN (${delPlaceholders})`, deletableIds);
 
 			try {

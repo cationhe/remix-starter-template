@@ -633,6 +633,15 @@ export async function action({ request, context }: ActionFunctionArgs) {
 				const placeholders = postIds.map(() => "?").join(",");
 				await execute(db, `DELETE FROM post_likes WHERE post_id IN (${placeholders})`, postIds);
 				await execute(db, `DELETE FROM comments WHERE post_id IN (${placeholders})`, postIds);
+				try {
+					await execute(db, `DELETE FROM post_edits WHERE post_id IN (${placeholders})`, postIds);
+				} catch {
+				}
+				try {
+					await execute(db, `DELETE FROM hidden_post_invites WHERE post_id IN (${placeholders})`, postIds);
+					await execute(db, `DELETE FROM hidden_post_access_tokens WHERE post_id IN (${placeholders})`, postIds);
+				} catch {
+				}
 				await execute(db, `DELETE FROM posts WHERE id IN (${placeholders})`, postIds);
 			}
 

@@ -658,3 +658,50 @@ test("帖子移区：超管可从帖子页无刷新移区并写入审计日志",
 		}),
 	).toBeTruthy();
 });
+
+test("删帖：超管删除已编辑帖子不应触发外键约束失败", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const superadminEmail = "7103308@qq.com";
+	const superadminPassword = "Admin123";
+	const title = `删帖外键_${Date.now()}`;
+	const editedTitle = `${title}_已编辑`;
+	const start = Date.now();
+
+	await registerOrLogin(page, { email: superadminEmail, displayName: "superadmin", password: superadminPassword });
+
+	await page.goto("/posts/new", { waitUntil: "domcontentloaded" });
+	await page.locator('input[name="title"]').fill(title);
+	await page.locator('textarea[name="content"]').fill("delete fk");
+	await page.getByRole("button", { name: "发布" }).click();
+	await expect(page).toHaveURL(/\/posts$/);
+
+	await page.getByRole("link", { name: title }).click();
+	await expect(page).toHaveURL(/\/posts\//);
+
+	const postId = (() => {
+		const m = page.url().match(/\/posts\/(\d+)/);
+		return m ? Number(m[1]) : 0;
+	})();
+	expect(postId > 0).toBeTruthy();
+
+	await page.getByRole("link", { name: "编辑" }).click();
+	await expect(page).toHaveURL(new RegExp(`/posts/${postId}/edit`));
+	await expect(page.getByRole("heading", { name: "编辑帖子" })).toBeVisible();
+	await page.locator('input[name="title"]').fill(editedTitle);
+	await page.locator('input[name="confirm"][type="checkbox"]').check();
+	await page.getByRole("button", { name: "保存" }).click();
+	await expect(page).toHaveURL(new RegExp(`/posts/${postId}(\\?.*)?$`));
+	await expect(page.getByRole("heading", { name: editedTitle })).toBeVisible();
+
+	await page.getByRole("button", { name: "删帖" }).click();
+	await expect(page).toHaveURL(/\/posts$/);
+	await expect(page.getByRole("link", { name: editedTitle })).toHaveCount(0);
+
+	const logs = await waitForAuditLog(page, {
+		eventType: "post_deleted",
+		predicate: (l) => Number(l?.createdAt ?? 0) >= start && l?.metadata?.postId === postId,
+	});
+	expect(logs.some((l) => Number(l?.createdAt ?? 0) >= start && l?.metadata?.postId === postId)).toBeTruthy();
+});

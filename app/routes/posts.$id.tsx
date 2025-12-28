@@ -1077,6 +1077,10 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await removeAllPostImagesForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
+			try {
+				await execute(db, "DELETE FROM post_edits WHERE post_id = ?", [postId]);
+			} catch {
+			}
 			// 清理隐藏帖子相关的邀请和 token，防止外键约束冲突
 			try {
 				await execute(db, "DELETE FROM hidden_post_invites WHERE post_id = ?", [postId]);
@@ -1124,6 +1128,10 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 			await removeAllPostImagesForPost(context, postId);
 			await execute(db, "DELETE FROM post_likes WHERE post_id = ?", [postId]);
 			await execute(db, "DELETE FROM comments WHERE post_id = ?", [postId]);
+			try {
+				await execute(db, "DELETE FROM post_edits WHERE post_id = ?", [postId]);
+			} catch {
+			}
 			// 清理隐藏帖子相关的邀请和 token，防止外键约束冲突
 			try {
 				await execute(db, "DELETE FROM hidden_post_invites WHERE post_id = ?", [postId]);
