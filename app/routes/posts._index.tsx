@@ -141,8 +141,8 @@ export default function PostsIndex() {
 	const isBanned = Boolean(data.user?.isBanned);
 	const now = Date.now();
 	return (
-		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
-			<div className="mx-auto flex max-w-3xl flex-col gap-6">
+		<div className="px-6 py-8">
+			<div className="mx-auto flex max-w-6xl flex-col gap-6">
 				<header className="flex items-center justify-between">
 					<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
 						帖子列表
@@ -213,7 +213,7 @@ export default function PostsIndex() {
 				) : (
 					<div className="flex flex-col gap-4">
 						{data.areas.map((area) => (
-							<section key={area.id} className="overflow-hidden rounded-xl bg-white shadow dark:bg-gray-800">
+							<section key={area.id} className="overflow-hidden rounded-xl bg-white/80 backdrop-blur-sm shadow-md ring-1 ring-slate-900/5 transition-all hover:shadow-lg dark:bg-slate-800/80 dark:ring-slate-100/10">
 								<div className="flex items-center justify-between px-6 py-4">
 									<div className="flex items-center gap-2">
 										<h2
@@ -228,13 +228,13 @@ export default function PostsIndex() {
 												borderRadius: "8px",
 											}}
 										>
-												<Link
-													to={`/areas/${area.id}`}
-													className="text-blue-700 hover:underline dark:text-blue-400"
-												>
-													{area.name}
-												</Link>
-											</h2>
+											<Link
+												to={`/areas/${area.id}`}
+												className="text-blue-700 hover:underline dark:text-blue-400"
+											>
+												{area.name}
+											</Link>
+										</h2>
 										{area.isHidden ? (
 											<span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-100">
 												隐藏
@@ -286,7 +286,8 @@ export default function PostsIndex() {
 									</ul>
 								)}
 							</section>
-						))}
+						))
+						}
 					</div>
 				)}
 				<div>

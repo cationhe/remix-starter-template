@@ -356,20 +356,20 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	return json<LoaderData>(
 		{
-		user,
-		siteOrigin,
-		post,
-		hiddenInvites,
-		attachments,
-		attachmentStorage,
-		postEdits,
-		comments: commentsWithAttachments,
-		commentCount,
-		likeCount,
-		likedByMe,
-		page,
-		pageSize,
-		totalPages,
+			user,
+			siteOrigin,
+			post,
+			hiddenInvites,
+			attachments,
+			attachmentStorage,
+			postEdits,
+			comments: commentsWithAttachments,
+			commentCount,
+			likeCount,
+			likedByMe,
+			page,
+			pageSize,
+			totalPages,
 		},
 		accessHeaders ? { headers: accessHeaders } : undefined,
 	);
@@ -1119,7 +1119,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 					[userId, "post_delete_denied", ip, userAgent, JSON.stringify({ postId, postAuthorId: postOwner.authorId, userRole: user.role }), Date.now()],
 				);
-			} catch {}
+			} catch { }
 			return json<ActionData>({ formError: "无权删除该帖子" }, { status: 403 });
 		}
 		try {
@@ -1151,7 +1151,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 					[userId, "post_deleted", ip, userAgent, JSON.stringify({ postId, postAuthorId: postOwner.authorId, deletedByRole: user.role }), Date.now()],
 				);
-			} catch {}
+			} catch { }
 			return redirect("/posts");
 		} catch (error) {
 			console.error("Delete Post Full Error:", error);
@@ -1791,24 +1791,24 @@ export default function PostDetailPage() {
 	}, [location.search]);
 	type MessageDialogState =
 		| {
-				target: "post";
-				recipientId: number;
-				recipientName: string;
-				recipientRole: UserRole;
-				subject: string;
-				body: string;
-				linkPreview: string;
-			}
+			target: "post";
+			recipientId: number;
+			recipientName: string;
+			recipientRole: UserRole;
+			subject: string;
+			body: string;
+			linkPreview: string;
+		}
 		| {
-				target: "comment";
-				commentId: number;
-				recipientId: number;
-				recipientName: string;
-				recipientRole: UserRole;
-				subject: string;
-				body: string;
-				linkPreview: string;
-			};
+			target: "comment";
+			commentId: number;
+			recipientId: number;
+			recipientName: string;
+			recipientRole: UserRole;
+			subject: string;
+			body: string;
+			linkPreview: string;
+		};
 	const [messageDialog, setMessageDialog] = useState<MessageDialogState | null>(null);
 	const [postBannedState, setPostBannedState] = useState(() => Boolean(data.post.isBanned));
 	const [postBannedReason, setPostBannedReason] = useState<string | null>(() => data.post.bannedReason ?? null);
@@ -2017,13 +2017,13 @@ export default function PostDetailPage() {
 		if (!ext) {
 			return "文件必须包含扩展名";
 		}
-			if (isSuperadminUser) return null;
-			const allowed = new Set(["ino", "py", "rar", "zip", "docx", "doc", "pdf", "mp4"]);
-			if (!allowed.has(ext)) {
-				return "不支持的文件类型";
-			}
-			return null;
+		if (isSuperadminUser) return null;
+		const allowed = new Set(["ino", "py", "rar", "zip", "docx", "doc", "pdf", "mp4"]);
+		if (!allowed.has(ext)) {
+			return "不支持的文件类型";
 		}
+		return null;
+	}
 
 	function isLikelyNetworkError(error: unknown) {
 		if (!error) return false;
@@ -2431,8 +2431,8 @@ export default function PostDetailPage() {
 				prev.map((c) =>
 					c.id === commentId
 						?
-							{ ...c, isShielded: 0, shieldedAt: null, shieldedBy: null, shieldedByName: null, shieldReason: null }
-							: c,
+						{ ...c, isShielded: 0, shieldedAt: null, shieldedBy: null, shieldedByName: null, shieldReason: null }
+						: c,
 				),
 			);
 		} catch (e) {
@@ -2948,8 +2948,8 @@ export default function PostDetailPage() {
 		return <Outlet />;
 	}
 	return (
-		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
-			<div className="mx-auto flex max-w-3xl flex-col gap-6">
+		<div className="px-6 py-8">
+			<div className="mx-auto flex max-w-6xl flex-col gap-6">
 				<header className="flex items-center justify-between">
 					<div>
 						<h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
@@ -2962,19 +2962,19 @@ export default function PostDetailPage() {
 									置顶
 								</span>
 							) : null}
-						{postBanned ? (
-							<span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-200">
-								已封禁
+							{postBanned ? (
+								<span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-200">
+									已封禁
+								</span>
+							) : null}
+							{data.post.isHidden ? (
+								<span className="ml-2 rounded bg-gray-200 px-2 py-0.5 text-gray-700 dark:bg-gray-700 dark:text-gray-100">
+									隐藏帖
+								</span>
+							) : null}
+							<span className="ml-3">
+								发布时间：{new Date(data.post.createdAt).toLocaleString()}
 							</span>
-						) : null}
-						{data.post.isHidden ? (
-							<span className="ml-2 rounded bg-gray-200 px-2 py-0.5 text-gray-700 dark:bg-gray-700 dark:text-gray-100">
-								隐藏帖
-							</span>
-						) : null}
-						<span className="ml-3">
-							发布时间：{new Date(data.post.createdAt).toLocaleString()}
-						</span>
 							{data.post.updatedAt ? (
 								<span className="ml-3">
 									最后修改：{new Date(data.post.updatedAt).toLocaleString()}
@@ -3135,7 +3135,7 @@ export default function PostDetailPage() {
 							</div>
 						</div>
 					) : null}
-					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
+					<section className="rounded-xl bg-white/80 backdrop-blur-sm p-6 shadow-md ring-1 ring-slate-900/5 dark:bg-slate-800/80 dark:ring-slate-100/10">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<Link
 								to="/posts"
@@ -3185,13 +3185,13 @@ export default function PostDetailPage() {
 												subject: "关于您的帖子通知",
 												body: "",
 												linkPreview: `[帖子：${data.post.title}](${data.siteOrigin}${location.pathname}${safeSearch})`,
-										});
-									}}
-									className="rounded border border-gray-300 px-3 py-1 text-sm font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-								>
-									✉️发送消息
-								</button>
-							) : null}
+											});
+										}}
+										className="rounded border border-gray-300 px-3 py-1 text-sm font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									>
+										✉️发送消息
+									</button>
+								) : null}
 								{data.user ? (
 									data.user.id !== data.post.authorId ? (
 										isBanned ? (
@@ -3274,7 +3274,7 @@ export default function PostDetailPage() {
 															data.post.isHidden
 																? "rounded bg-gray-800 px-3 py-1 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
 																: "rounded bg-purple-700 px-3 py-1 text-sm font-medium text-white hover:bg-purple-800"
-													}
+														}
 													>
 														{data.post.isHidden ? "取消隐藏" : "设为隐藏"}
 													</button>
@@ -3291,47 +3291,47 @@ export default function PostDetailPage() {
 														<div className="font-medium text-gray-900 dark:text-gray-100">受邀用户</div>
 														<span className="text-xs text-gray-500 dark:text-gray-400">
 															{Array.isArray(data.hiddenInvites) ? `共 ${data.hiddenInvites.length} 条邀请记录` : ""}
-													</span>
-												</div>
-												{Array.isArray(data.hiddenInvites) && data.hiddenInvites.length > 0 ? (
-													<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
-														{data.hiddenInvites.map((inv) => (
-															<li key={`${inv.postId}_${inv.invitedUserId}_${inv.invitedAt}`} className="flex flex-wrap items-center gap-2">
-																<span className="font-medium">{inv.invitedUserName}</span>
-																<span className="text-gray-500 dark:text-gray-400">（ID: {inv.invitedUserId}）</span>
-																{inv.revokedAt ? (
-																	<span className="rounded bg-gray-200 px-2 py-0.5 text-gray-700 dark:bg-gray-700 dark:text-gray-100">已撤销</span>
-																) : inv.acceptedAt ? (
-																	<span className="rounded bg-green-100 px-2 py-0.5 text-green-700 dark:bg-green-900/30 dark:text-green-200">已进入</span>
-																) : (
-																	<span className="rounded bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">未进入</span>
-																)}
-																<span className="text-gray-500 dark:text-gray-400">邀请时间：{new Date(inv.invitedAt).toLocaleString()}</span>
-															</li>
-														))}
-													</ul>
-												) : (
-													<p className="mt-2 text-xs text-gray-500 dark:text-gray-400">暂无邀请记录。</p>
-												)}
-												<Form method="post" className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
-													<input type="hidden" name="intent" value="inviteHiddenUsers" />
-													<div className="flex-1">
-														<label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">邀请用户ID</label>
-														<input
-															name="inviteUserIds"
-															maxLength={2000}
-															className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-															placeholder="例如：12, 35, 80（用逗号或空格分隔）"
-														/>
+														</span>
 													</div>
-													<button type="submit" className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
-														发送邀请
-													</button>
-												</Form>
-											</div>
-										) : null}
-									</div>
-								) : null}
+													{Array.isArray(data.hiddenInvites) && data.hiddenInvites.length > 0 ? (
+														<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+															{data.hiddenInvites.map((inv) => (
+																<li key={`${inv.postId}_${inv.invitedUserId}_${inv.invitedAt}`} className="flex flex-wrap items-center gap-2">
+																	<span className="font-medium">{inv.invitedUserName}</span>
+																	<span className="text-gray-500 dark:text-gray-400">（ID: {inv.invitedUserId}）</span>
+																	{inv.revokedAt ? (
+																		<span className="rounded bg-gray-200 px-2 py-0.5 text-gray-700 dark:bg-gray-700 dark:text-gray-100">已撤销</span>
+																	) : inv.acceptedAt ? (
+																		<span className="rounded bg-green-100 px-2 py-0.5 text-green-700 dark:bg-green-900/30 dark:text-green-200">已进入</span>
+																	) : (
+																		<span className="rounded bg-amber-100 px-2 py-0.5 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">未进入</span>
+																	)}
+																	<span className="text-gray-500 dark:text-gray-400">邀请时间：{new Date(inv.invitedAt).toLocaleString()}</span>
+																</li>
+															))}
+														</ul>
+													) : (
+														<p className="mt-2 text-xs text-gray-500 dark:text-gray-400">暂无邀请记录。</p>
+													)}
+													<Form method="post" className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+														<input type="hidden" name="intent" value="inviteHiddenUsers" />
+														<div className="flex-1">
+															<label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">邀请用户ID</label>
+															<input
+																name="inviteUserIds"
+																maxLength={2000}
+																className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+																placeholder="例如：12, 35, 80（用逗号或空格分隔）"
+															/>
+														</div>
+														<button type="submit" className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+															发送邀请
+														</button>
+													</Form>
+												</div>
+											) : null}
+										</div>
+									) : null}
 									{postBanned ? (
 										<div className="flex flex-wrap items-center gap-2">
 											{isSuperadminUser ? (
@@ -3432,26 +3432,26 @@ export default function PostDetailPage() {
 								</div>
 							</div>
 						) : null}
-					<div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-800 dark:text-gray-100">
-						{contentParts.map((p, idx) => {
-							if (p.type === "image") {
-								return (
-									<span key={`img_${p.imageId}_${idx}`} className="my-3 block">
-										<img
-											src={`/post-images/${p.imageId}`}
-											alt={`插图 ${p.imageId}`}
-											loading="lazy"
-											className="mx-auto block max-h-[560px] w-auto max-w-full rounded border border-gray-200 bg-white dark:border-gray-700"
-										/>
-									</span>
-								);
-							}
-							return <span key={`txt_${idx}`}>{p.text}</span>;
-						})}
-					</div>
+						<div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-800 dark:text-gray-100">
+							{contentParts.map((p, idx) => {
+								if (p.type === "image") {
+									return (
+										<span key={`img_${p.imageId}_${idx}`} className="my-3 block">
+											<img
+												src={`/post-images/${p.imageId}`}
+												alt={`插图 ${p.imageId}`}
+												loading="lazy"
+												className="mx-auto block max-h-[560px] w-auto max-w-full rounded border border-gray-200 bg-white dark:border-gray-700"
+											/>
+										</span>
+									);
+								}
+								return <span key={`txt_${idx}`}>{p.text}</span>;
+							})}
+						</div>
 					</section>
 					{data.postEdits.length > 0 ? (
-						<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
+						<section className="rounded-xl bg-white/80 backdrop-blur-sm p-6 shadow-md ring-1 ring-slate-900/5 dark:bg-slate-800/80 dark:ring-slate-100/10">
 							<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
 								修改历史（{data.postEdits.length}）
 							</h2>
@@ -3475,16 +3475,16 @@ export default function PostDetailPage() {
 													标题：{e.oldTitle} → {e.newTitle}
 												</div>
 											) : null}
-									</li>
+										</li>
 									);
 								})}
 							</ul>
 						</section>
 					) : null}
-					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
+					<section className="rounded-xl bg-white/80 backdrop-blur-sm p-6 shadow-md ring-1 ring-slate-900/5 dark:bg-slate-800/80 dark:ring-slate-100/10">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-									附件（{attachments.length} / {formatCount(maxFilesPerPost)}）
+								附件（{attachments.length} / {formatCount(maxFilesPerPost)}）
 							</h2>
 							<span className="text-xs text-gray-500 dark:text-gray-400">
 								单附件大小：{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(attachmentLimits.MAX_FILE_SIZE_BYTES)}
@@ -3505,22 +3505,22 @@ export default function PostDetailPage() {
 													} else {
 														setSelectedAttachmentIds(attachments.map((a) => a.id));
 													}
-											}}
-											className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-900 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
+												}}
+												className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-900 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
+											>
+												{selectedAttachmentIds.length === attachments.length ? "清空选择" : "全选"}
+											</button>
+											<span className="text-gray-600 dark:text-gray-300">已选 {selectedAttachmentIds.length} 个</span>
+										</div>
+										<button
+											type="button"
+											onClick={() => deletePostAttachments(selectedAttachmentIds)}
+											disabled={selectedAttachmentIds.length === 0}
+											className="rounded bg-red-600 px-3 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
 										>
-											{selectedAttachmentIds.length === attachments.length ? "清空选择" : "全选"}
+											删除所选
 										</button>
-										<span className="text-gray-600 dark:text-gray-300">已选 {selectedAttachmentIds.length} 个</span>
 									</div>
-									<button
-										type="button"
-										onClick={() => deletePostAttachments(selectedAttachmentIds)}
-										disabled={selectedAttachmentIds.length === 0}
-										className="rounded bg-red-600 px-3 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
-									>
-										删除所选
-									</button>
-								</div>
 								) : null}
 								<ul className="space-y-2">
 									{attachments.map((a) => (
@@ -3554,36 +3554,36 @@ export default function PostDetailPage() {
 														type="button"
 														onClick={() => requestDownload(a.id)}
 														disabled={isBanned || postBanned || !a.isDownloadable}
-													className={
-														isBanned || postBanned || !a.isDownloadable
-															? "cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-															: "rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
-													}
-												>
-													{postBanned || !a.isDownloadable ? "已禁止下载" : "下载"}
-												</button>
-											) : postBanned || !a.isDownloadable ? (
-												<span className="cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
-													已禁止下载
-												</span>
-											) : (
-												<a
-													href="/login"
-													className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
-												>
-													登录后下载
-												</a>
-											)}
+														className={
+															isBanned || postBanned || !a.isDownloadable
+																? "cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+																: "rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+														}
+													>
+														{postBanned || !a.isDownloadable ? "已禁止下载" : "下载"}
+													</button>
+												) : postBanned || !a.isDownloadable ? (
+													<span className="cursor-not-allowed rounded bg-gray-300 px-3 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+														已禁止下载
+													</span>
+												) : (
+													<a
+														href="/login"
+														className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+													>
+														登录后下载
+													</a>
+												)}
 												{canManageAttachments ? (
 													<button
 														type="button"
 														onClick={() => deletePostAttachments([a.id])}
-													disabled={Boolean(deletingPostAttachmentIds[a.id])}
-													className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-70"
-												>
-													{deletingPostAttachmentIds[a.id] ? "删除中..." : "删除"}
-												</button>
-											) : null}
+														disabled={Boolean(deletingPostAttachmentIds[a.id])}
+														className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-70"
+													>
+														{deletingPostAttachmentIds[a.id] ? "删除中..." : "删除"}
+													</button>
+												) : null}
 											</div>
 										</li>
 									))}
@@ -3591,216 +3591,216 @@ export default function PostDetailPage() {
 							</div>
 						)}
 
-					{canManageAttachments ? (
-						<div className="mt-6 rounded border border-gray-200 p-4 dark:border-gray-700">
-							<div className="flex flex-col gap-3">
-								<div className="flex items-center justify-between gap-3">
-									<div className="min-w-0">
-										<label className="text-sm font-medium text-gray-900 dark:text-gray-100">
-											上传附件
-										</label>
-										<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+						{canManageAttachments ? (
+							<div className="mt-6 rounded border border-gray-200 p-4 dark:border-gray-700">
+								<div className="flex flex-col gap-3">
+									<div className="flex items-center justify-between gap-3">
+										<div className="min-w-0">
+											<label className="text-sm font-medium text-gray-900 dark:text-gray-100">
+												上传附件
+											</label>
+											<div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
 												<span>剩余可上传：{formatCount(remainingSlots)} 个</span>
-											<span>
-												已选 {formatSize(selectionSize.selectedBytes)} / 剩余 {formatSize(selectionSize.remainingBytes)}
-											</span>
-											{selectedFiles.length > remainingSlots ? (
-												<span className="text-amber-700 dark:text-amber-300">
-													已选择 {selectedFiles.length} 个，仅上传前 {remainingSlots} 个
+												<span>
+													已选 {formatSize(selectionSize.selectedBytes)} / 剩余 {formatSize(selectionSize.remainingBytes)}
 												</span>
-											) : null}
-											{selectionSize.overLimit ? (
-												<span className="text-red-600 dark:text-red-300">
-													已超出 {formatSize(attachmentLimits.MAX_TOTAL_POST_BYTES)} 上限
-												</span>
-											) : null}
-										</div>
-									</div>
-									<button
-										type="button"
-										onClick={() => fileInputRef.current?.click()}
-										disabled={busy || remainingSlots <= 0 || uploadsPaused}
-										className={
-											busy || remainingSlots <= 0 || uploadsPaused
-												? "h-9 w-12 cursor-not-allowed rounded bg-gray-300 text-[10px] font-semibold text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-												: "h-9 w-12 rounded bg-gradient-to-r from-blue-600 to-cyan-500 text-[10px] font-semibold text-white shadow hover:from-blue-700 hover:to-cyan-600"
-										}
-									>
-										<span className="block leading-3">
-											上传
-											<br />
-											附件
-										</span>
-									</button>
-								</div>
-							{uploadsPaused ? (
-								<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
-									{uploadsPausedMessage}
-								</div>
-							) : null}
-			<input
-				ref={fileInputRef}
-				type="file"
-				multiple
-				disabled={busy || remainingSlots <= 0 || uploadsPaused}
-				onChange={(e) => {
-					const files = Array.from(e.target.files || []);
-					const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
-					if (hasTooSmall) {
-						setGlobalError("上传文件大小不能小于10字节");
-						setSelectedFiles([]);
-						e.currentTarget.value = "";
-						return;
-					}
-					setGlobalError(null);
-					setSelectedFiles(files);
-					e.currentTarget.value = "";
-				}}
-				className="hidden"
-			/>
-							<div
-								onDragEnter={(e) => {
-									e.preventDefault();
-								if (busy || remainingSlots <= 0 || uploadsPaused) return;
-								setIsDragging(true);
-							}}
-								onDragOver={(e) => {
-									e.preventDefault();
-								if (busy || remainingSlots <= 0 || uploadsPaused) return;
-								setIsDragging(true);
-							}}
-								onDragLeave={(e) => {
-									e.preventDefault();
-								setIsDragging(false);
-							}}
-				onDrop={(e) => {
-					e.preventDefault();
-				setIsDragging(false);
-				if (busy || remainingSlots <= 0 || uploadsPaused) return;
-				const files = Array.from(e.dataTransfer.files || []);
-				const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
-				if (hasTooSmall) {
-					setGlobalError("上传文件大小不能小于10字节");
-					setSelectedFiles([]);
-					return;
-				}
-				setGlobalError(null);
-				setSelectedFiles(files);
-			}}
-			className={
-				busy || remainingSlots <= 0 || uploadsPaused
-					? "rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-500"
-									: isDragging
-										? "cursor-pointer rounded-lg border border-dashed border-blue-400 bg-blue-50 p-4 text-sm text-blue-700 dark:border-blue-600 dark:bg-blue-900/20 dark:text-blue-200"
-										: "cursor-pointer rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 hover:border-blue-400 hover:bg-blue-50 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-200 dark:hover:border-blue-600 dark:hover:bg-blue-900/20"
-							}
-							onClick={() => {
-								if (busy || remainingSlots <= 0 || uploadsPaused) return;
-								fileInputRef.current?.click();
-							}}
-							role="button"
-							tabIndex={0}
-							onKeyDown={(e) => {
-								if (e.key !== "Enter" && e.key !== " ") return;
-								e.preventDefault();
-								if (busy || remainingSlots <= 0 || uploadsPaused) return;
-								fileInputRef.current?.click();
-							}}
-						>
-							<div className="flex items-start justify-between gap-3">
-								<div className="min-w-0">
-									<div className="font-medium">
-										拖拽文件到此处，或点击选择文件
-									</div>
-											<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-												单帖总大小上限 {formatSize(maxTotalPostBytes)}；大文件将自动分块上传
-											</div>
-										</div>
-										<div className="text-xs text-gray-500 dark:text-gray-400">
-											{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(maxFileSizeBytesForUser)}
-										</div>
-									</div>
-							{effectiveSelectedFiles.length > 0 ? (
-								<ul className="mt-3 space-y-1 text-xs text-gray-700 dark:text-gray-200">
-									{effectiveSelectedFiles.map((f) => (
-										<li key={f.name} className="flex items-center justify-between gap-3">
-											<span className="min-w-0 truncate">{f.name}</span>
-											<span className="shrink-0 text-gray-500 dark:text-gray-400">
-												{formatSize(f.size)}
-												{f.type ? ` · ${f.type}` : ""}
-											</span>
-										</li>
-									))}
-								</ul>
-							) : null}
-						</div>
-								<div className="flex items-center justify-between">
-													<span className="text-xs text-gray-500 dark:text-gray-400">
-														{maxFilesPerPost === Number.POSITIVE_INFINITY ? "每帖附件数量不限" : `每帖最多 ${maxFilesPerPost} 个附件`}
+												{selectedFiles.length > remainingSlots ? (
+													<span className="text-amber-700 dark:text-amber-300">
+														已选择 {selectedFiles.length} 个，仅上传前 {remainingSlots} 个
 													</span>
-									<button
-										type="button"
-										onClick={startUpload}
-										disabled={busy || effectiveSelectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused || selectionSize.overLimit}
-										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-									>
-										{busy ? "上传中..." : "开始上传"}
-									</button>
-								</div>
-
-						{queue.length > 0 ? (
-							<ul className="mt-2 space-y-2">
-								{queue.map((q) => (
-									<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-sm dark:bg-gray-900/30">
-										<div className="flex items-center justify-between gap-3">
-											<span className="truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
-											<span className="text-xs text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
-										</div>
-										<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
-											<div
-												className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
-												style={{ width: `${Math.round(q.progress * 100)}%` }}
-											/>
-										</div>
-										<div className="mt-1 flex items-center justify-between text-xs">
-											<span className="text-gray-600 dark:text-gray-300">
-												{q.status === "pending"
-													? "等待上传"
-													: q.status === "uploading"
-														? "上传中"
-													: q.status === "done"
-														? "已完成"
-														: "失败"}
-											</span>
-											<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
-										</div>
-										{q.error ? (
-											<div className="mt-2 flex items-start justify-between gap-3 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
-												<span className="min-w-0 flex-1 break-words">{q.error}</span>
-												{q.status === "error" && q.recoverable ? (
-													<button
-														type="button"
-														onClick={() => retryUploadItem(q.id)}
-														disabled={busy}
-														className="shrink-0 rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-70"
-													>
-														重试
-													</button>
+												) : null}
+												{selectionSize.overLimit ? (
+													<span className="text-red-600 dark:text-red-300">
+														已超出 {formatSize(attachmentLimits.MAX_TOTAL_POST_BYTES)} 上限
+													</span>
 												) : null}
 											</div>
+										</div>
+										<button
+											type="button"
+											onClick={() => fileInputRef.current?.click()}
+											disabled={busy || remainingSlots <= 0 || uploadsPaused}
+											className={
+												busy || remainingSlots <= 0 || uploadsPaused
+													? "h-9 w-12 cursor-not-allowed rounded bg-gray-300 text-[10px] font-semibold text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+													: "h-9 w-12 rounded bg-gradient-to-r from-blue-600 to-cyan-500 text-[10px] font-semibold text-white shadow hover:from-blue-700 hover:to-cyan-600"
+											}
+										>
+											<span className="block leading-3">
+												上传
+												<br />
+												附件
+											</span>
+										</button>
+									</div>
+									{uploadsPaused ? (
+										<div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+											{uploadsPausedMessage}
+										</div>
+									) : null}
+									<input
+										ref={fileInputRef}
+										type="file"
+										multiple
+										disabled={busy || remainingSlots <= 0 || uploadsPaused}
+										onChange={(e) => {
+											const files = Array.from(e.target.files || []);
+											const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
+											if (hasTooSmall) {
+												setGlobalError("上传文件大小不能小于10字节");
+												setSelectedFiles([]);
+												e.currentTarget.value = "";
+												return;
+											}
+											setGlobalError(null);
+											setSelectedFiles(files);
+											e.currentTarget.value = "";
+										}}
+										className="hidden"
+									/>
+									<div
+										onDragEnter={(e) => {
+											e.preventDefault();
+											if (busy || remainingSlots <= 0 || uploadsPaused) return;
+											setIsDragging(true);
+										}}
+										onDragOver={(e) => {
+											e.preventDefault();
+											if (busy || remainingSlots <= 0 || uploadsPaused) return;
+											setIsDragging(true);
+										}}
+										onDragLeave={(e) => {
+											e.preventDefault();
+											setIsDragging(false);
+										}}
+										onDrop={(e) => {
+											e.preventDefault();
+											setIsDragging(false);
+											if (busy || remainingSlots <= 0 || uploadsPaused) return;
+											const files = Array.from(e.dataTransfer.files || []);
+											const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
+											if (hasTooSmall) {
+												setGlobalError("上传文件大小不能小于10字节");
+												setSelectedFiles([]);
+												return;
+											}
+											setGlobalError(null);
+											setSelectedFiles(files);
+										}}
+										className={
+											busy || remainingSlots <= 0 || uploadsPaused
+												? "rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-sm text-gray-400 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-500"
+												: isDragging
+													? "cursor-pointer rounded-lg border border-dashed border-blue-400 bg-blue-50 p-4 text-sm text-blue-700 dark:border-blue-600 dark:bg-blue-900/20 dark:text-blue-200"
+													: "cursor-pointer rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 hover:border-blue-400 hover:bg-blue-50 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-200 dark:hover:border-blue-600 dark:hover:bg-blue-900/20"
+										}
+										onClick={() => {
+											if (busy || remainingSlots <= 0 || uploadsPaused) return;
+											fileInputRef.current?.click();
+										}}
+										role="button"
+										tabIndex={0}
+										onKeyDown={(e) => {
+											if (e.key !== "Enter" && e.key !== " ") return;
+											e.preventDefault();
+											if (busy || remainingSlots <= 0 || uploadsPaused) return;
+											fileInputRef.current?.click();
+										}}
+									>
+										<div className="flex items-start justify-between gap-3">
+											<div className="min-w-0">
+												<div className="font-medium">
+													拖拽文件到此处，或点击选择文件
+												</div>
+												<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+													单帖总大小上限 {formatSize(maxTotalPostBytes)}；大文件将自动分块上传
+												</div>
+											</div>
+											<div className="text-xs text-gray-500 dark:text-gray-400">
+												{formatSize(attachmentLimits.MIN_FILE_SIZE_BYTES)}~{formatSize(maxFileSizeBytesForUser)}
+											</div>
+										</div>
+										{effectiveSelectedFiles.length > 0 ? (
+											<ul className="mt-3 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+												{effectiveSelectedFiles.map((f) => (
+													<li key={f.name} className="flex items-center justify-between gap-3">
+														<span className="min-w-0 truncate">{f.name}</span>
+														<span className="shrink-0 text-gray-500 dark:text-gray-400">
+															{formatSize(f.size)}
+															{f.type ? ` · ${f.type}` : ""}
+														</span>
+													</li>
+												))}
+											</ul>
 										) : null}
-									</li>
-								))}
-							</ul>
-						) : null}
+									</div>
+									<div className="flex items-center justify-between">
+										<span className="text-xs text-gray-500 dark:text-gray-400">
+											{maxFilesPerPost === Number.POSITIVE_INFINITY ? "每帖附件数量不限" : `每帖最多 ${maxFilesPerPost} 个附件`}
+										</span>
+										<button
+											type="button"
+											onClick={startUpload}
+											disabled={busy || effectiveSelectedFiles.length === 0 || remainingSlots <= 0 || uploadsPaused || selectionSize.overLimit}
+											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+										>
+											{busy ? "上传中..." : "开始上传"}
+										</button>
+									</div>
+
+									{queue.length > 0 ? (
+										<ul className="mt-2 space-y-2">
+											{queue.map((q) => (
+												<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-sm dark:bg-gray-900/30">
+													<div className="flex items-center justify-between gap-3">
+														<span className="truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
+														<span className="text-xs text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
+													</div>
+													<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
+														<div
+															className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
+															style={{ width: `${Math.round(q.progress * 100)}%` }}
+														/>
+													</div>
+													<div className="mt-1 flex items-center justify-between text-xs">
+														<span className="text-gray-600 dark:text-gray-300">
+															{q.status === "pending"
+																? "等待上传"
+																: q.status === "uploading"
+																	? "上传中"
+																	: q.status === "done"
+																		? "已完成"
+																		: "失败"}
+														</span>
+														<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
+													</div>
+													{q.error ? (
+														<div className="mt-2 flex items-start justify-between gap-3 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+															<span className="min-w-0 flex-1 break-words">{q.error}</span>
+															{q.status === "error" && q.recoverable ? (
+																<button
+																	type="button"
+																	onClick={() => retryUploadItem(q.id)}
+																	disabled={busy}
+																	className="shrink-0 rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-70"
+																>
+																	重试
+																</button>
+															) : null}
+														</div>
+													) : null}
+												</li>
+											))}
+										</ul>
+									) : null}
 								</div>
 							</div>
 						) : null}
 					</section>
-					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
-		<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
-			评论（{commentCount}）
-		</h2>
+					<section className="rounded-xl bg-white/80 backdrop-blur-sm p-6 shadow-md ring-1 ring-slate-900/5 dark:bg-slate-800/80 dark:ring-slate-100/10">
+						<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
+							评论（{commentCount}）
+						</h2>
 						{comments.length === 0 ? (
 							<p className="text-sm text-gray-600 dark:text-gray-300">
 								还没有任何评论。
@@ -3851,7 +3851,7 @@ export default function PostDetailPage() {
 											className={
 												shielded
 													? "rounded border border-red-200 bg-red-50/60 p-3 dark:border-red-900/40 dark:bg-red-900/10"
-												: "border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700"
+													: "border-b border-gray-200 pb-3 last:border-none last:pb-0 dark:border-gray-700"
 											}
 										>
 											<div className="mb-1 flex items-center justify-between">
@@ -3862,7 +3862,7 @@ export default function PostDetailPage() {
 													<span className="inline-flex items-center gap-1 rounded bg-red-600 px-2 py-0.5 text-[11px] font-medium text-white">
 														<svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5" aria-hidden="true">
 															<path d="M12 2c3 0 6 1.2 8 3.2V12c0 5-3.4 9.3-8 10.7C7.4 21.3 4 17 4 12V5.2C6 3.2 9 2 12 2Zm0 2c-2.1 0-4.2.8-6 2.3V12c0 3.9 2.5 7.4 6 8.6 3.5-1.2 6-4.7 6-8.6V6.3C16.2 4.8 14.1 4 12 4Z" />
-													</svg>
+														</svg>
 														已屏蔽
 													</span>
 												) : null}
@@ -3876,8 +3876,8 @@ export default function PostDetailPage() {
 														<div className="rounded border border-red-200 bg-white p-3 text-xs text-red-800 dark:border-red-900/40 dark:bg-gray-900/30 dark:text-red-200">
 															<div className="flex items-center gap-2 font-medium">
 																<svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
-																<path d="M12 2c3 0 6 1.2 8 3.2V12c0 5-3.4 9.3-8 10.7C7.4 21.3 4 17 4 12V5.2C6 3.2 9 2 12 2Zm0 2c-2.1 0-4.2.8-6 2.3V12c0 3.9 2.5 7.4 6 8.6 3.5-1.2 6-4.7 6-8.6V6.3C16.2 4.8 14.1 4 12 4Z" />
-															</svg>
+																	<path d="M12 2c3 0 6 1.2 8 3.2V12c0 5-3.4 9.3-8 10.7C7.4 21.3 4 17 4 12V5.2C6 3.2 9 2 12 2Zm0 2c-2.1 0-4.2.8-6 2.3V12c0 3.9 2.5 7.4 6 8.6 3.5-1.2 6-4.7 6-8.6V6.3C16.2 4.8 14.1 4 12 4Z" />
+																</svg>
 																已屏蔽
 															</div>
 															{comment.shieldReason ? <div className="mt-1">原因：{comment.shieldReason}</div> : null}
@@ -3928,17 +3928,17 @@ export default function PostDetailPage() {
 													<p className="text-gray-500 dark:text-gray-400">
 														<span>作者：{comment.authorName}</span>
 													</p>
-												<div className="flex flex-wrap items-center justify-end gap-2">
+													<div className="flex flex-wrap items-center justify-end gap-2">
 														{isOwner && !isBanned && !shielded ? (
 															<>
 																<button
-																		type="button"
-																		onClick={() => startEditComment(comment.id)}
-																		disabled={busy}
-																		className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
-																	>
-																		编辑
-																	</button>
+																	type="button"
+																	onClick={() => startEditComment(comment.id)}
+																	disabled={busy}
+																	className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+																>
+																	编辑
+																</button>
 																<button
 																	type="button"
 																	onClick={() => deleteComment(comment.id)}
@@ -3949,8 +3949,8 @@ export default function PostDetailPage() {
 																</button>
 															</>
 														) : null}
-													{isAdminUser ? (
-														<div className="flex items-center gap-2">
+														{isAdminUser ? (
+															<div className="flex items-center gap-2">
 																<button
 																	type="button"
 																	onClick={() => (shielded ? unshieldComment(comment.id) : shieldComment(comment.id))}
@@ -3960,231 +3960,231 @@ export default function PostDetailPage() {
 																	{shielded ? (isSuperadminUser ? "解除屏蔽" : "已屏蔽") : "屏蔽"}
 																</button>
 																{showShieldPermissionDenied ? <span className="text-[11px] text-red-600">权限不足</span> : null}
-														</div>
-													) : null}
-													{canSendAdminMessage && data.user && data.user.id !== comment.authorId && canSendMessage(data.user.role, comment.authorRole) ? (
-														<button
-															type="button"
-															onClick={() => {
-															setMessageDialog({
-																target: "comment",
-																commentId: comment.id,
-																recipientId: comment.authorId,
-																recipientName: comment.authorName,
-																recipientRole: comment.authorRole,
-																subject: "关于您的评论通知",
-																body: "",
-																linkPreview: `[评论：${data.post.title}](${data.siteOrigin}${location.pathname}${safeSearch}#comment-${comment.id})`,
-															});
-														}}
-														className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
-													>
-														✉️发送消息
-													</button>
-												) : null}
-												</div>
-											</div>
-								</div>
-										{comment.attachments.length === 0 ? null : (
-											<ul className="mt-3 space-y-2">
-												{comment.attachments.map((a) => (
-													<li
-														key={a.id}
-														className={
-															deletingCommentAttachmentIds[a.id]
-																? "flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs opacity-60 transition-opacity dark:border-gray-700"
-																: "flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs transition-opacity dark:border-gray-700"
-														}
-													>
-														<div className="flex min-w-0 items-start gap-2">
-															{data.user && data.user.id === comment.authorId && !isBanned ? (
-																<input
-																	type="checkbox"
-																	checked={(commentSelectedAttachmentIds[comment.id] || []).includes(a.id)}
-																	onChange={() => toggleSelectedCommentAttachment(comment.id, a.id)}
-																	disabled={Boolean(deletingCommentAttachmentIds[a.id])}
-																	className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600"
-																/>
-															) : null}
-															<div className="min-w-0">
-																<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
-																<div className="text-[11px] text-gray-500 dark:text-gray-400">
-																	{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
-																</div>
 															</div>
-														</div>
-													{data.user ? (
-														<div className="flex items-center gap-2">
+														) : null}
+														{canSendAdminMessage && data.user && data.user.id !== comment.authorId && canSendMessage(data.user.role, comment.authorRole) ? (
 															<button
 																type="button"
-																onClick={() => requestCommentDownload(a.id)}
-															disabled={isBanned || postBanned || !a.isDownloadable}
+																onClick={() => {
+																	setMessageDialog({
+																		target: "comment",
+																		commentId: comment.id,
+																		recipientId: comment.authorId,
+																		recipientName: comment.authorName,
+																		recipientRole: comment.authorRole,
+																		subject: "关于您的评论通知",
+																		body: "",
+																		linkPreview: `[评论：${data.post.title}](${data.siteOrigin}${location.pathname}${safeSearch}#comment-${comment.id})`,
+																	});
+																}}
+																className="rounded border border-gray-300 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+															>
+																✉️发送消息
+															</button>
+														) : null}
+													</div>
+												</div>
+											</div>
+											{comment.attachments.length === 0 ? null : (
+												<ul className="mt-3 space-y-2">
+													{comment.attachments.map((a) => (
+														<li
+															key={a.id}
 															className={
-															isBanned || postBanned || !a.isDownloadable
-																? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-																: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
-														}
+																deletingCommentAttachmentIds[a.id]
+																	? "flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs opacity-60 transition-opacity dark:border-gray-700"
+																	: "flex items-center justify-between gap-3 rounded border border-gray-200 px-3 py-2 text-xs transition-opacity dark:border-gray-700"
+															}
 														>
-															{postBanned || !a.isDownloadable ? "已禁止下载" : "下载"}
-														</button>
-																{data.user.id === comment.authorId && !isBanned ? (
+															<div className="flex min-w-0 items-start gap-2">
+																{data.user && data.user.id === comment.authorId && !isBanned ? (
+																	<input
+																		type="checkbox"
+																		checked={(commentSelectedAttachmentIds[comment.id] || []).includes(a.id)}
+																		onChange={() => toggleSelectedCommentAttachment(comment.id, a.id)}
+																		disabled={Boolean(deletingCommentAttachmentIds[a.id])}
+																		className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600"
+																	/>
+																) : null}
+																<div className="min-w-0">
+																	<div className="truncate font-medium text-gray-900 dark:text-gray-100">{a.filename}</div>
+																	<div className="text-[11px] text-gray-500 dark:text-gray-400">
+																		{formatSize(a.sizeBytes)} · {new Date(a.createdAt).toLocaleString()}
+																	</div>
+																</div>
+															</div>
+															{data.user ? (
+																<div className="flex items-center gap-2">
 																	<button
 																		type="button"
-																		onClick={() => deleteCommentAttachments(comment.id, [a.id])}
-																	disabled={Boolean(deletingCommentAttachmentIds[a.id])}
-																	className="rounded bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-70"
+																		onClick={() => requestCommentDownload(a.id)}
+																		disabled={isBanned || postBanned || !a.isDownloadable}
+																		className={
+																			isBanned || postBanned || !a.isDownloadable
+																				? "cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+																				: "rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+																		}
 																	>
-																	{deletingCommentAttachmentIds[a.id] ? "删除中..." : "删除"}
-																</button>
-															) : null}
-														</div>
-												) : postBanned || !a.isDownloadable ? (
-													<span className="cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
-														已禁止下载
-													</span>
-												) : (
-													<a
-														href="/login"
-														className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
-													>
-														登录后下载
-												</a>
-											)}
-												</li>
-											))}
-										</ul>
-									)}
-
-										{data.user && data.user.id === comment.authorId && !isBanned && comment.attachments.length > 0 ? (
-											<div className="mt-2 flex flex-wrap items-center justify-end gap-2 text-xs">
-												<button
-													type="button"
-													onClick={() => {
-														const current = commentSelectedAttachmentIds[comment.id] || [];
-														if (current.length === comment.attachments.length) {
-															setCommentSelectedAttachmentIds((prev) => ({ ...prev, [comment.id]: [] }));
-														} else {
-															setCommentSelectedAttachmentIds((prev) => ({ ...prev, [comment.id]: comment.attachments.map((a) => a.id) }));
-														}
-												}}
-												className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
-											>
-												{(commentSelectedAttachmentIds[comment.id] || []).length === comment.attachments.length ? "清空选择" : "全选"}
-											</button>
-														<button
-																type="button"
-																onClick={() => deleteCommentAttachments(comment.id, commentSelectedAttachmentIds[comment.id] || [])}
-																disabled={deleteSelectedDisabled}
-																className="rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
-															>
-																{deleteSelectedText}
-															</button>
-										</div>
-									) : null}
-
-										{data.user && data.user.id === comment.authorId && !isBanned ? (
-											<div className="mt-3 rounded border border-gray-200 p-3 dark:border-gray-700">
-												<div className="flex items-center justify-between gap-3">
-													<div className="min-w-0">
-														<div className="text-sm font-medium text-gray-900 dark:text-gray-100">上传评论附件</div>
-												<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-																剩余可上传：{String(remainingUploadSlots)} 个；单条评论总大小上限 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
-															</div>
-													</div>
-													<button
-														type="button"
-														onClick={() => startCommentUpload(comment.id, comment.attachments)}
-														disabled={Boolean(commentUploads[comment.id]?.busy) || postBanned}
-														className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-													>
-														{postBanned ? "已封禁" : commentUploads[comment.id]?.busy ? "上传中..." : "开始上传"}
-													</button>
-												</div>
-												{postBanned ? (
-													<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
-														该帖子已被封禁，已禁止评论附件上传
-													</div>
-												) : null}
-												<div className="mt-2 flex items-center justify-between gap-3">
-													<input
-														type="file"
-														multiple
-														disabled={Boolean(commentUploads[comment.id]?.busy) || postBanned}
-														onChange={(e) => {
-															const files = Array.from(e.target.files || []);
-										const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
-										if (hasTooSmall) {
-											updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: [], error: "上传文件大小不能小于10字节" }));
-											e.currentTarget.value = "";
-											return;
-										}
-										updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
-										e.currentTarget.value = "";
-									}}
-									className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
-								/>
-													</div>
-																<div>
-																	<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
-																		<span>
-																			已选 {formatSize(selectedBytes)} / 剩余 {formatSize(remainingBytes)}
-																		</span>
-																		{commentUploadState.selectedFiles.length > remainingUploadSlots ? (
-																			<span className="text-amber-700 dark:text-amber-300">
-																				已选择 {commentUploadState.selectedFiles.length} 个，仅上传前 {remainingUploadSlots} 个
-																			</span>
-																		) : null}
-																		{overLimit ? (
-																			<span className="text-red-600 dark:text-red-300">
-																				已超出 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)} 上限
-																			</span>
-																		) : null}
-																	</div>
-																	{effectiveSelectedFiles.length > 0 ? (
-																		<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
-																			{effectiveSelectedFiles.map((f) => (
-																				<li key={f.name} className="flex items-center justify-between gap-3">
-																					<span className="min-w-0 truncate">{f.name}</span>
-																					<span className="shrink-0 text-gray-500 dark:text-gray-400">
-																						{formatSize(f.size)}
-																						{f.type ? ` · ${f.type}` : ""}
-																					</span>
-																				</li>
-																			))}
-																		</ul>
-																	) : null}
-																	{commentUploadState.error ? (
-																		<div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
-																			{commentUploadState.error}
-																		</div>
+																		{postBanned || !a.isDownloadable ? "已禁止下载" : "下载"}
+																	</button>
+																	{data.user.id === comment.authorId && !isBanned ? (
+																		<button
+																			type="button"
+																			onClick={() => deleteCommentAttachments(comment.id, [a.id])}
+																			disabled={Boolean(deletingCommentAttachmentIds[a.id])}
+																			className="rounded bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 disabled:opacity-70"
+																		>
+																			{deletingCommentAttachmentIds[a.id] ? "删除中..." : "删除"}
+																		</button>
 																	) : null}
 																</div>
+															) : postBanned || !a.isDownloadable ? (
+																<span className="cursor-not-allowed rounded bg-gray-300 px-2 py-1 text-[11px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+																	已禁止下载
+																</span>
+															) : (
+																<a
+																	href="/login"
+																	className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+																>
+																	登录后下载
+																</a>
+															)}
+														</li>
+													))}
+												</ul>
+											)}
+
+											{data.user && data.user.id === comment.authorId && !isBanned && comment.attachments.length > 0 ? (
+												<div className="mt-2 flex flex-wrap items-center justify-end gap-2 text-xs">
+													<button
+														type="button"
+														onClick={() => {
+															const current = commentSelectedAttachmentIds[comment.id] || [];
+															if (current.length === comment.attachments.length) {
+																setCommentSelectedAttachmentIds((prev) => ({ ...prev, [comment.id]: [] }));
+															} else {
+																setCommentSelectedAttachmentIds((prev) => ({ ...prev, [comment.id]: comment.attachments.map((a) => a.id) }));
+															}
+														}}
+														className="rounded border border-gray-300 bg-white px-2 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
+													>
+														{(commentSelectedAttachmentIds[comment.id] || []).length === comment.attachments.length ? "清空选择" : "全选"}
+													</button>
+													<button
+														type="button"
+														onClick={() => deleteCommentAttachments(comment.id, commentSelectedAttachmentIds[comment.id] || [])}
+														disabled={deleteSelectedDisabled}
+														className="rounded bg-red-600 px-2 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-60"
+													>
+														{deleteSelectedText}
+													</button>
+												</div>
+											) : null}
+
+											{data.user && data.user.id === comment.authorId && !isBanned ? (
+												<div className="mt-3 rounded border border-gray-200 p-3 dark:border-gray-700">
+													<div className="flex items-center justify-between gap-3">
+														<div className="min-w-0">
+															<div className="text-sm font-medium text-gray-900 dark:text-gray-100">上传评论附件</div>
+															<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+																剩余可上传：{String(remainingUploadSlots)} 个；单条评论总大小上限 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)}
+															</div>
+														</div>
+														<button
+															type="button"
+															onClick={() => startCommentUpload(comment.id, comment.attachments)}
+															disabled={Boolean(commentUploads[comment.id]?.busy) || postBanned}
+															className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+														>
+															{postBanned ? "已封禁" : commentUploads[comment.id]?.busy ? "上传中..." : "开始上传"}
+														</button>
+													</div>
+													{postBanned ? (
+														<div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
+															该帖子已被封禁，已禁止评论附件上传
+														</div>
+													) : null}
+													<div className="mt-2 flex items-center justify-between gap-3">
+														<input
+															type="file"
+															multiple
+															disabled={Boolean(commentUploads[comment.id]?.busy) || postBanned}
+															onChange={(e) => {
+																const files = Array.from(e.target.files || []);
+																const hasTooSmall = files.some((f) => Number.isFinite(f.size) && f.size < attachmentLimits.MIN_FILE_SIZE_BYTES);
+																if (hasTooSmall) {
+																	updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: [], error: "上传文件大小不能小于10字节" }));
+																	e.currentTarget.value = "";
+																	return;
+																}
+																updateCommentUploads(comment.id, (c) => ({ ...c, selectedFiles: files, error: null }));
+																e.currentTarget.value = "";
+															}}
+															className="block w-full text-xs text-gray-700 file:mr-3 file:rounded file:border-0 file:bg-gray-100 file:px-3 file:py-1 file:text-xs file:font-medium file:text-gray-900 hover:file:bg-gray-200 dark:text-gray-200 dark:file:bg-gray-800 dark:file:text-gray-100 dark:hover:file:bg-gray-700"
+														/>
+													</div>
+													<div>
+														<div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+															<span>
+																已选 {formatSize(selectedBytes)} / 剩余 {formatSize(remainingBytes)}
+															</span>
+															{commentUploadState.selectedFiles.length > remainingUploadSlots ? (
+																<span className="text-amber-700 dark:text-amber-300">
+																	已选择 {commentUploadState.selectedFiles.length} 个，仅上传前 {remainingUploadSlots} 个
+																</span>
+															) : null}
+															{overLimit ? (
+																<span className="text-red-600 dark:text-red-300">
+																	已超出 {formatSize(attachmentLimits.MAX_TOTAL_COMMENT_BYTES)} 上限
+																</span>
+															) : null}
+														</div>
+														{effectiveSelectedFiles.length > 0 ? (
+															<ul className="mt-2 space-y-1 text-xs text-gray-700 dark:text-gray-200">
+																{effectiveSelectedFiles.map((f) => (
+																	<li key={f.name} className="flex items-center justify-between gap-3">
+																		<span className="min-w-0 truncate">{f.name}</span>
+																		<span className="shrink-0 text-gray-500 dark:text-gray-400">
+																			{formatSize(f.size)}
+																			{f.type ? ` · ${f.type}` : ""}
+																		</span>
+																	</li>
+																))}
+															</ul>
+														) : null}
+														{commentUploadState.error ? (
+															<div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+																{commentUploadState.error}
+															</div>
+														) : null}
+													</div>
 													{commentUploads[comment.id]?.queue?.length ? (
 														<ul className="mt-2 space-y-2">
 															{commentUploads[comment.id].queue.map((q) => (
 																<li key={q.id} className="rounded bg-gray-50 px-3 py-2 text-xs dark:bg-gray-900/30">
-																<div className="flex items-center justify-between gap-3">
-																	<span className="min-w-0 truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
-																	<span className="shrink-0 text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
-																</div>
-																<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
-																	<div
-																		className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
-																		style={{ width: `${Math.round(q.progress * 100)}%` }}
-																	/>
-																</div>
+																	<div className="flex items-center justify-between gap-3">
+																		<span className="min-w-0 truncate text-gray-900 dark:text-gray-100">{q.file.name}</span>
+																		<span className="shrink-0 text-gray-500 dark:text-gray-400">{formatSize(q.file.size)}</span>
+																	</div>
+																	<div className="mt-2 h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
+																		<div
+																			className={q.status === "error" ? "h-2 bg-red-500" : "h-2 bg-blue-600"}
+																			style={{ width: `${Math.round(q.progress * 100)}%` }}
+																		/>
+																	</div>
 																	<div className="mt-1 flex items-center justify-between text-[11px]">
-																	<span className="text-gray-600 dark:text-gray-300">
-																		{q.status === "pending"
-																			? "等待上传"
-																			: q.status === "uploading"
-																				? "上传中"
-																				: q.status === "done"
-																					? "已完成"
-																					: "失败"}
-																	</span>
-																	<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
-																</div>
+																		<span className="text-gray-600 dark:text-gray-300">
+																			{q.status === "pending"
+																				? "等待上传"
+																				: q.status === "uploading"
+																					? "上传中"
+																					: q.status === "done"
+																						? "已完成"
+																						: "失败"}
+																		</span>
+																		<span className="text-gray-500 dark:text-gray-400">{Math.round(q.progress * 100)}%</span>
+																	</div>
 																	{q.error ? (
 																		<div className="mt-2 flex items-start justify-between gap-3 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
 																			<span className="min-w-0 flex-1 break-words">{q.error}</span>
@@ -4204,16 +4204,16 @@ export default function PostDetailPage() {
 															))}
 														</ul>
 													) : null}
-											</div>
-										) : null}
-									</li>
-								);
-							})}
-						</ul>
-					)}
-					<div className="mt-6 flex items-center justify-between text-sm">
-						<div className="text-gray-600 dark:text-gray-300">
-							第 {data.page} / {data.totalPages} 页
+												</div>
+											) : null}
+										</li>
+									);
+								})}
+							</ul>
+						)}
+						<div className="mt-6 flex items-center justify-between text-sm">
+							<div className="text-gray-600 dark:text-gray-300">
+								第 {data.page} / {data.totalPages} 页
 							</div>
 							<div className="flex items-center gap-3">
 								{canPrev ? (
@@ -4243,7 +4243,7 @@ export default function PostDetailPage() {
 							</div>
 						</div>
 					</section>
-					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
+					<section className="rounded-xl bg-white/80 backdrop-blur-sm p-6 shadow-md ring-1 ring-slate-900/5 dark:bg-slate-800/80 dark:ring-slate-100/10">
 						<h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
 							发表评论
 						</h2>
@@ -4255,36 +4255,36 @@ export default function PostDetailPage() {
 							) : postBanned ? (
 								<p className="text-sm text-gray-600 dark:text-gray-300">该帖子已封禁，禁止跟帖回复。</p>
 							) : (
-							<Form method="post" className="space-y-4">
-								<input type="hidden" name="intent" value="comment" />
-								<div>
-									<textarea
-										name="content"
-										rows={4}
-										className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-									/>
-									{actionData?.fieldErrors?.content ? (
-										<p className="mt-1 text-xs text-red-600">
-											{actionData.fieldErrors.content}
-										</p>
+								<Form method="post" className="space-y-4">
+									<input type="hidden" name="intent" value="comment" />
+									<div>
+										<textarea
+											name="content"
+											rows={4}
+											className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+										/>
+										{actionData?.fieldErrors?.content ? (
+											<p className="mt-1 text-xs text-red-600">
+												{actionData.fieldErrors.content}
+											</p>
+										) : null}
+									</div>
+									{actionData?.formError ? (
+										<p className="text-sm text-red-600">{actionData.formError}</p>
 									) : null}
-								</div>
-								{actionData?.formError ? (
-									<p className="text-sm text-red-600">{actionData.formError}</p>
-								) : null}
-								<div className="flex items-center justify-between">
-									<span className="text-xs text-gray-500 dark:text-gray-400">
-										当前第 {data.page} 页发表评论会刷新当前页
-									</span>
-									<button
-										type="submit"
-										disabled={isSubmitting}
-										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
-									>
-										{isSubmitting ? "提交中..." : "提交评论"}
-									</button>
-								</div>
-							</Form>
+									<div className="flex items-center justify-between">
+										<span className="text-xs text-gray-500 dark:text-gray-400">
+											当前第 {data.page} 页发表评论会刷新当前页
+										</span>
+										<button
+											type="submit"
+											disabled={isSubmitting}
+											className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
+										>
+											{isSubmitting ? "提交中..." : "提交评论"}
+										</button>
+									</div>
+								</Form>
 							)
 						) : (
 							<p className="text-sm text-gray-600 dark:text-gray-300">
@@ -4307,7 +4307,7 @@ export default function PostDetailPage() {
 										onClick={() => {
 											if (messageFetcher.state === "submitting") return;
 											setMessageDialog(null);
-									}}
+										}}
 										disabled={messageFetcher.state === "submitting"}
 										className="rounded px-2 py-1 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-70 dark:text-gray-300 dark:hover:bg-gray-800"
 									>
