@@ -192,6 +192,14 @@ export default function App() {
 										>
 											存储容量
 										</Link>
+										{user.role === "topadmin" ? (
+											<Link
+												to="/admin/system-logs"
+												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+											>
+												系统日志
+											</Link>
+										) : null}
 											</>
 									) : null}
 								</>
