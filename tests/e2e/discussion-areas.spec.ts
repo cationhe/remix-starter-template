@@ -576,3 +576,85 @@ test("置顶：topadmin 可置顶/取消置顶并写入审计日志", async ({ p
 		}),
 	).toBeTruthy();
 });
+
+test("帖子移区：超管可从帖子页无刷新移区并写入审计日志", async ({ page }) => {
+	test.setTimeout(180000);
+	page.setDefaultNavigationTimeout(120000);
+
+	const superadminEmail = "7103308@qq.com";
+	const superadminPassword = "Admin123";
+	const fromAreaName = `移区来源_${Date.now()}`;
+	const toAreaName = `移区目标_${Date.now()}`;
+	const title = `移区帖_${Date.now()}`;
+	const start = Date.now();
+
+	await registerOrLogin(page, { email: superadminEmail, displayName: "superadmin", password: superadminPassword });
+	await page.goto("/admin/discussion-areas", { waitUntil: "domcontentloaded" });
+
+	await page.getByPlaceholder("例如：综合讨论").fill(fromAreaName);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, fromAreaName);
+	const fromRow = await getAreaRowByName(page, fromAreaName);
+	const fromAreaId = Number(await fromRow.locator('input[name="areaId"]').inputValue());
+	expect(fromAreaId > 0).toBeTruthy();
+
+	await page.getByPlaceholder("例如：综合讨论").fill(toAreaName);
+	await page.getByRole("button", { name: "创建" }).click();
+	await expectHasAreaNameInput(page, toAreaName);
+	const toRow = await getAreaRowByName(page, toAreaName);
+	const toAreaId = Number(await toRow.locator('input[name="areaId"]').inputValue());
+	expect(toAreaId > 0).toBeTruthy();
+
+	await page.goto(`/posts/new?areaId=${fromAreaId}`, { waitUntil: "domcontentloaded" });
+	await page.locator('input[name="title"]').fill(title);
+	await page.locator('textarea[name="content"]').fill("migrate");
+	await page.getByRole("button", { name: "发布" }).click();
+	await expect(page).toHaveURL(new RegExp(`/areas/${fromAreaId}(\\?.*)?$`));
+	await page.getByRole("link", { name: title }).click();
+	await expect(page).toHaveURL(/\/posts\//);
+
+	const postId = (() => {
+		const m = page.url().match(/\/posts\/(\d+)/);
+		return m ? Number(m[1]) : 0;
+	})();
+	expect(postId > 0).toBeTruthy();
+
+	await expect(page.getByText("管理操作")).toBeVisible();
+	const migrateButton = page.getByRole("button", { name: "移区" });
+	await expect(migrateButton).toBeVisible();
+	await expect(migrateButton).toHaveAttribute("title", "将帖子移动到其他分区");
+	await migrateButton.click();
+
+	const dialog = getDialogByTitle(page, "移动到其他分区");
+	await expect(dialog).toBeVisible();
+	await dialog.getByRole("button", { name: new RegExp(toAreaName) }).click();
+	await dialog.getByRole("button", { name: "确认移动" }).click();
+
+	await expect(page.getByText(`移区成功：${toAreaName}`)).toBeVisible();
+	await expect(dialog).toHaveCount(0);
+
+	await page.goto(`/areas/${toAreaId}`, { waitUntil: "domcontentloaded" });
+	await expect(page.getByRole("link", { name: title })).toBeVisible();
+
+	const migrateLogs = await waitForAuditLog(page, {
+		eventType: "post_migrated_to_area",
+		predicate: (l) => {
+			return (
+				Number(l?.createdAt ?? 0) >= start &&
+				l?.metadata?.postId === postId &&
+				l?.metadata?.fromAreaId === fromAreaId &&
+				l?.metadata?.toAreaId === toAreaId
+			);
+		},
+	});
+	expect(
+		migrateLogs.some((l) => {
+			return (
+				Number(l?.createdAt ?? 0) >= start &&
+				l?.metadata?.postId === postId &&
+				l?.metadata?.fromAreaId === fromAreaId &&
+				l?.metadata?.toAreaId === toAreaId
+			);
+		}),
+	).toBeTruthy();
+});

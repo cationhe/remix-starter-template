@@ -2,7 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/cloudfla
 import { json, redirect } from "@remix-run/cloudflare";
 import { Form, Link, useActionData, useLoaderData, useNavigation } from "@remix-run/react";
 import { useMemo, useState } from "react";
-import { assertAdmin, assertNotBanned, getClientIp, requireUser, verifyLogin } from "~/lib/auth.server";
+import { assertNotBanned, getClientIp, isSuperadmin, requireUser, verifyLogin } from "~/lib/auth.server";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 
 type AreaListItem = {
@@ -114,7 +114,9 @@ async function getPreview(args: {
 export async function loader({ request, context }: LoaderFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
-	assertAdmin(me);
+	if (!isSuperadmin(me)) {
+		throw new Response("只有超级管理员或站点管理员可访问", { status: 403 });
+	}
 
 	const db = getDBFromContext(context);
 	const areas = await queryAll<AreaListItem>(
@@ -127,7 +129,9 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 export async function action({ request, context }: ActionFunctionArgs) {
 	const me = await requireUser(request, context);
 	assertNotBanned(me);
-	assertAdmin(me);
+	if (!isSuperadmin(me)) {
+		throw new Response("只有超级管理员或站点管理员可访问", { status: 403 });
+	}
 
 	const formData = await request.formData();
 	const intent = String(formData.get("intent") || "").trim();
@@ -361,4 +365,3 @@ export default function AdminPostMigrationsPage() {
 		</div>
 	);
 }
-

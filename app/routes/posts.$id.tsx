@@ -223,7 +223,12 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
 
 	if (user) {
 		const permissionReady = await isDiscussionPermissionsReady(context);
-		if (permissionReady && !(post.isHidden && (hasHiddenInvite || canBypassHidden))) {
+		if (
+			permissionReady &&
+			user.role !== "topadmin" &&
+			user.role !== "superadmin" &&
+			!(post.isHidden && (hasHiddenInvite || canBypassHidden))
+		) {
 			const ok = await canViewDiscussionArea(context, post.areaId, user.role);
 			if (!ok) {
 				const ip = getClientIp(request);
@@ -422,7 +427,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		hasHiddenInvite = true;
 	}
 	const permissionReady = await isDiscussionPermissionsReady(context);
-	if (permissionReady) {
+	if (permissionReady && !isSuperadmin(user)) {
 		if (!(isHiddenPost && (hasHiddenInvite || canBypassHidden))) {
 			const ok = await canViewDiscussionArea(context, postAccess.areaId, user.role);
 			if (!ok) {
@@ -563,6 +568,130 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return wantsJson
 			? json({ ok: true as const })
 			: redirect(`${currentUrl.pathname}${currentUrl.search}`);
+	}
+
+	if (intent === "migratePost") {
+		if (!isSuperadmin(user)) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[userId, "post_migrate_denied", ip, userAgent, JSON.stringify({ postId, role: user.role }), Date.now()],
+				);
+			} catch {
+			}
+			return wantsJson
+				? json({ ok: false as const, error: "权限不足" }, { status: 403 })
+				: json<ActionData>({ formError: "权限不足" }, { status: 403 });
+		}
+
+		const rawTargetAreaId = String(formData.get("targetAreaId") || "").trim();
+		const targetAreaIdNum = Number(rawTargetAreaId);
+		const targetAreaId =
+			rawTargetAreaId && Number.isFinite(targetAreaIdNum) && targetAreaIdNum > 0 ? Math.floor(targetAreaIdNum) : 0;
+		if (!targetAreaId) {
+			return wantsJson
+				? json({ ok: false as const, error: "目标讨论区ID无效" }, { status: 400 })
+				: json<ActionData>({ formError: "目标讨论区ID无效" }, { status: 400 });
+		}
+
+		const postRow = await queryOne<{ title: string; content: string; authorId: number; areaId: number }>(
+			db,
+			"SELECT title as title, content as content, author_id as authorId, area_id as areaId FROM posts WHERE id = ? AND deleted_at IS NULL",
+			[postId],
+		);
+		if (!postRow) {
+			return wantsJson
+				? json({ ok: false as const, error: "帖子不存在" }, { status: 404 })
+				: json<ActionData>({ formError: "帖子不存在" }, { status: 404 });
+		}
+		if (postRow.areaId === targetAreaId) {
+			return wantsJson
+				? json({ ok: false as const, error: "帖子已在该讨论区" }, { status: 400 })
+				: json<ActionData>({ formError: "帖子已在该讨论区" }, { status: 400 });
+		}
+
+		const target = await queryOne<{ id: number; name: string }>(
+			db,
+			"SELECT id as id, name as name FROM discussion_areas WHERE id = ?",
+			[targetAreaId],
+		);
+		if (!target) {
+			return wantsJson
+				? json({ ok: false as const, error: "目标讨论区不存在" }, { status: 404 })
+				: json<ActionData>({ formError: "目标讨论区不存在" }, { status: 404 });
+		}
+
+		const now = Date.now();
+		try {
+			await execute(
+				db,
+				"UPDATE posts SET area_id = ?, updated_at = ?, updated_by = ? WHERE id = ? AND deleted_at IS NULL",
+				[targetAreaId, now, userId, postId],
+			);
+			try {
+				await execute(
+					db,
+					"INSERT INTO post_edits (post_id, editor_id, created_at, old_title, old_content, old_area_id, new_title, new_content, new_area_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					[
+						postId,
+						userId,
+						now,
+						postRow.title,
+						postRow.content,
+						postRow.areaId,
+						postRow.title,
+						postRow.content,
+						targetAreaId,
+					],
+				);
+			} catch {
+			}
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"post_migrated_to_area",
+						ip,
+						userAgent,
+						JSON.stringify({
+							postId,
+							postAuthorId: postRow.authorId,
+							fromAreaId: postRow.areaId,
+							toAreaId: targetAreaId,
+							toAreaName: target.name,
+							actorRole: user.role,
+						}),
+						now,
+					],
+				);
+			} catch {
+			}
+			return wantsJson
+				? json({ ok: true as const, fromAreaId: postRow.areaId, toAreaId: targetAreaId, toAreaName: target.name })
+				: redirect(`${currentUrl.pathname}${currentUrl.search}`);
+		} catch (error) {
+			try {
+				await execute(
+					db,
+					"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+					[
+						userId,
+						"post_migrate_failed",
+						ip,
+						userAgent,
+						JSON.stringify({ postId, fromAreaId: postRow.areaId, toAreaId: targetAreaId, message: error instanceof Error ? error.message : "" }),
+						now,
+					],
+				);
+			} catch {
+			}
+			return wantsJson
+				? json({ ok: false as const, error: "移区失败，请稍后重试" }, { status: 500 })
+				: json<ActionData>({ formError: "移区失败，请稍后重试" }, { status: 500 });
+		}
 	}
 
 	if (intent === "setHidden") {
@@ -1633,6 +1762,18 @@ export default function PostDetailPage() {
 	const [globalSuccess, setGlobalSuccess] = useState<string | null>(null);
 	const messageFetcher = useFetcher<{ ok: boolean; error?: string }>();
 	const messageHandledRef = useRef(false);
+	type DiscussionAreaListItem = { areaId: number; name: string; isHidden: number };
+	type MigrateActionData =
+		| { ok: true; fromAreaId: number; toAreaId: number; toAreaName: string }
+		| { ok: false; error: string };
+	const areasFetcher = useFetcher<{ areas: DiscussionAreaListItem[] }>();
+	const migrateFetcher = useFetcher<MigrateActionData>();
+	const migrateHandledRef = useRef(false);
+	const [migrateDialogOpen, setMigrateDialogOpen] = useState(false);
+	const [migrateQuery, setMigrateQuery] = useState("");
+	const [migrateHiddenFilter, setMigrateHiddenFilter] = useState<"all" | "visible" | "hidden">("all");
+	const [migrateSelectedAreaId, setMigrateSelectedAreaId] = useState<number | null>(null);
+	const [migrateLocalError, setMigrateLocalError] = useState<string | null>(null);
 	const canSendAdminMessage = data.user?.role === "topadmin" || data.user?.role === "superadmin";
 	const safeSearch = useMemo(() => {
 		const params = new URLSearchParams(location.search);
@@ -1685,6 +1826,19 @@ export default function PostDetailPage() {
 	}, [globalSuccess]);
 
 	useEffect(() => {
+		if (!migrateDialogOpen) return;
+		const id = window.setTimeout(() => {
+			const params = new URLSearchParams();
+			const q = migrateQuery.trim();
+			if (q) params.set("q", q);
+			params.set("hidden", migrateHiddenFilter);
+			params.set("limit", "100");
+			areasFetcher.load(`/api/discussion-areas?${params.toString()}`);
+		}, 300);
+		return () => window.clearTimeout(id);
+	}, [areasFetcher, migrateDialogOpen, migrateHiddenFilter, migrateQuery]);
+
+	useEffect(() => {
 		if (messageFetcher.state === "submitting") {
 			messageHandledRef.current = false;
 			return;
@@ -1701,6 +1855,59 @@ export default function PostDetailPage() {
 			setGlobalError(messageFetcher.data.error || "发送失败，请稍后重试");
 		}
 	}, [messageFetcher.data, messageFetcher.state]);
+
+	useEffect(() => {
+		if (migrateFetcher.state === "submitting") {
+			migrateHandledRef.current = false;
+			return;
+		}
+		if (migrateFetcher.state !== "idle") return;
+		if (!migrateFetcher.data) return;
+		if (migrateHandledRef.current) return;
+		migrateHandledRef.current = true;
+		if (migrateFetcher.data.ok) {
+			setMigrateDialogOpen(false);
+			setMigrateQuery("");
+			setMigrateHiddenFilter("all");
+			setMigrateSelectedAreaId(null);
+			setMigrateLocalError(null);
+			setGlobalError(null);
+			setGlobalSuccess(`移区成功：${migrateFetcher.data.toAreaName}`);
+			revalidator.revalidate();
+		} else {
+			setMigrateLocalError(migrateFetcher.data.error || "移区失败，请稍后重试");
+		}
+	}, [migrateFetcher.data, migrateFetcher.state, revalidator]);
+
+	function openMigrateDialog() {
+		setMigrateDialogOpen(true);
+		setMigrateQuery("");
+		setMigrateHiddenFilter("all");
+		setMigrateSelectedAreaId(null);
+		setMigrateLocalError(null);
+		migrateHandledRef.current = false;
+		const params = new URLSearchParams();
+		params.set("hidden", "all");
+		params.set("limit", "100");
+		areasFetcher.load(`/api/discussion-areas?${params.toString()}`);
+	}
+
+	function submitMigrate() {
+		setMigrateLocalError(null);
+		const targetAreaId = migrateSelectedAreaId;
+		if (!targetAreaId) {
+			setMigrateLocalError("请选择目标讨论区");
+			return;
+		}
+		if (targetAreaId === data.post.areaId) {
+			setMigrateLocalError("帖子已在该讨论区");
+			return;
+		}
+		migrateFetcher.submit(
+			{ intent: "migratePost", targetAreaId: String(targetAreaId), wantsJson: "1" },
+			{ method: "post" },
+		);
+	}
 
 	useEffect(() => {
 		if (!isAdminUser) return;
@@ -2792,6 +2999,134 @@ export default function PostDetailPage() {
 							{globalError}
 						</div>
 					) : null}
+					{migrateDialogOpen ? (
+						<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+							<div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-lg dark:bg-gray-900">
+								<div className="flex items-start justify-between gap-4">
+									<div>
+										<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">移动到其他分区</h2>
+										<p className="mt-1 text-sm text-gray-600 dark:text-gray-300">将帖子移动到指定讨论区</p>
+									</div>
+									<button
+										type="button"
+										onClick={() => setMigrateDialogOpen(false)}
+										className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									>
+										关闭
+									</button>
+								</div>
+								{migrateLocalError ? (
+									<div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+										{migrateLocalError}
+									</div>
+								) : null}
+								<div className="mt-4 flex flex-col gap-3">
+									<input
+										value={migrateQuery}
+										onChange={(e) => setMigrateQuery(e.target.value)}
+										className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none ring-blue-500 focus:ring dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+										placeholder="搜索讨论区名称或ID"
+										maxLength={50}
+									/>
+									<div className="flex flex-wrap items-center gap-2 text-sm">
+										<button
+											type="button"
+											onClick={() => setMigrateHiddenFilter("all")}
+											className={
+												migrateHiddenFilter === "all"
+													? "rounded bg-gray-800 px-2 py-1 text-xs text-white dark:bg-gray-200 dark:text-gray-900"
+													: "rounded border border-gray-300 px-2 py-1 text-xs text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+											}
+										>
+											全部
+										</button>
+										<button
+											type="button"
+											onClick={() => setMigrateHiddenFilter("visible")}
+											className={
+												migrateHiddenFilter === "visible"
+													? "rounded bg-gray-800 px-2 py-1 text-xs text-white dark:bg-gray-200 dark:text-gray-900"
+													: "rounded border border-gray-300 px-2 py-1 text-xs text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+											}
+										>
+											仅显示可见
+										</button>
+										<button
+											type="button"
+											onClick={() => setMigrateHiddenFilter("hidden")}
+											className={
+												migrateHiddenFilter === "hidden"
+													? "rounded bg-gray-800 px-2 py-1 text-xs text-white dark:bg-gray-200 dark:text-gray-900"
+													: "rounded border border-gray-300 px-2 py-1 text-xs text-gray-800 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+											}
+										>
+											仅显示隐藏
+										</button>
+									</div>
+									<div className="max-h-64 overflow-auto rounded border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-950">
+										{areasFetcher.state !== "idle" && !areasFetcher.data ? (
+											<div className="p-4 text-sm text-gray-600 dark:text-gray-300">加载中...</div>
+										) : null}
+										{areasFetcher.data?.areas?.length ? (
+											<ul className="divide-y divide-gray-200 dark:divide-gray-800">
+												{areasFetcher.data.areas.map((a) => {
+													const isCurrent = a.areaId === data.post.areaId;
+													const selected = migrateSelectedAreaId === a.areaId;
+													return (
+														<li key={a.areaId} className="flex items-center justify-between gap-3 p-3">
+															<button
+																type="button"
+																disabled={isCurrent}
+																onClick={() => setMigrateSelectedAreaId(a.areaId)}
+																className={
+																	isCurrent
+																		? "cursor-not-allowed text-left text-sm text-gray-400"
+																		: selected
+																			? "text-left text-sm font-medium text-blue-700 dark:text-blue-400"
+																			: "text-left text-sm text-gray-900 hover:underline dark:text-gray-100"
+																}
+															>
+																{a.name} <span className="text-xs text-gray-500 dark:text-gray-400">(ID {a.areaId})</span>
+															</button>
+															<div className="flex items-center gap-2">
+																{a.isHidden ? (
+																	<span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-100">
+																		隐藏
+																	</span>
+																) : null}
+																{isCurrent ? (
+																	<span className="text-xs text-gray-500 dark:text-gray-400">当前</span>
+																) : null}
+															</div>
+														</li>
+													);
+												})}
+											</ul>
+										) : (
+											<div className="p-4 text-sm text-gray-600 dark:text-gray-300">暂无可选讨论区</div>
+										)}
+									</div>
+								</div>
+								<div className="mt-4 flex items-center justify-end gap-2">
+									<button
+										type="button"
+										onClick={() => setMigrateDialogOpen(false)}
+										className="rounded border border-gray-300 px-4 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									>
+										取消
+									</button>
+									<button
+										type="button"
+										onClick={submitMigrate}
+										disabled={!migrateSelectedAreaId || migrateFetcher.state === "submitting"}
+										className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+									>
+										{migrateFetcher.state === "submitting" ? "移动中..." : "确认移动"}
+									</button>
+								</div>
+							</div>
+						</div>
+					) : null}
 					<section className="rounded-xl bg-white p-6 shadow dark:bg-gray-800">
 						<div className="mb-4 flex items-center justify-between gap-3">
 							<Link
@@ -2900,6 +3235,18 @@ export default function PostDetailPage() {
 							<div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-700 dark:bg-gray-900/30">
 								<div className="mb-2 text-sm font-medium text-gray-900 dark:text-gray-100">管理操作</div>
 								<div className="flex flex-col gap-3">
+									{isSuperadminUser ? (
+										<div className="flex flex-wrap items-center gap-2">
+											<button
+												type="button"
+												onClick={openMigrateDialog}
+												title="将帖子移动到其他分区"
+												className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
+											>
+												移区
+											</button>
+										</div>
+									) : null}
 									{isTopadminUser ? (
 										<div className="flex flex-col gap-2">
 											<div className="flex flex-wrap items-center gap-2">
