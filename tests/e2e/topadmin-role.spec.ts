@@ -78,6 +78,8 @@ test("topadmin 可修改 superadmin 账户等级并写入审计日志", async ({
 		return l?.eventType === "user_role_updated" && l?.metadata?.targetEmail === userEmail && l?.metadata?.nextRole === "superadmin";
 	});
 	expect(Boolean(promoteLog)).toBeTruthy();
+	const operatorUserIdFromLog = Number(promoteLog?.userId ?? 0);
+	expect(operatorUserIdFromLog > 0).toBeTruthy();
 	const targetUserIdFromLog = Number(promoteLog?.metadata?.targetUserId ?? 0);
 	expect(targetUserIdFromLog > 0).toBeTruthy();
 
@@ -92,4 +94,11 @@ test("topadmin 可修改 superadmin 账户等级并写入审计日志", async ({
 		return l?.eventType === "superadmin_role_change_warning" && Number(l?.metadata?.targetUserId ?? 0) === targetUserIdFromLog;
 	});
 	expect(hasWarnLog).toBeTruthy();
+
+	await page.goto("/admin/system-logs", { waitUntil: "domcontentloaded" });
+	await expect(page.getByRole("heading", { name: "系统日志查询" })).toBeVisible();
+	await page.getByPlaceholder("操作人关键字（昵称/邮箱/ID）").fill(String(operatorUserIdFromLog));
+	await page.getByRole("button", { name: "查询" }).click();
+	await expect(page.getByText("正在查询…")).toBeHidden({ timeout: 20000 });
+	await expect(page.locator("tbody")).toContainText("user_role_updated");
 });

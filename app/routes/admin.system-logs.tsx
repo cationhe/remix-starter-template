@@ -279,10 +279,18 @@ function buildLogQuery(args: {
 		params.push(args.eventType);
 	}
 	if (args.operatorText) {
-		where.push("(operatorDisplayName LIKE ? OR operatorEmail LIKE ?)");
 		const like = `%${args.operatorText}%`;
-		params.push(like);
-		params.push(like);
+		const operatorIdMaybe = /^\d+$/.test(args.operatorText) ? parseIntOrNull(args.operatorText) : null;
+		if (operatorIdMaybe !== null && operatorIdMaybe >= 0 && args.userId === null) {
+			where.push("(userId = ? OR operatorDisplayName LIKE ? OR operatorEmail LIKE ?)");
+			params.push(operatorIdMaybe);
+			params.push(like);
+			params.push(like);
+		} else {
+			where.push("(operatorDisplayName LIKE ? OR operatorEmail LIKE ?)");
+			params.push(like);
+			params.push(like);
+		}
 	}
 	if (args.keyword) {
 		where.push("(eventType LIKE ? OR metadataJson LIKE ?)");
@@ -879,7 +887,7 @@ export default function AdminSystemLogsPage() {
 									<input
 										value={operatorText}
 										onChange={(e) => setOperatorText(e.target.value)}
-										placeholder="操作人关键字（姓名/邮箱）"
+										placeholder="操作人关键字（昵称/邮箱/ID）"
 										className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
 									/>
 								</div>
