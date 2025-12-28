@@ -10,3 +10,17 @@ body {
 		color-scheme: dark;
 	}
 }
+@layer utilities {
+	.bg-grid-slate-100 {
+		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='%23f1f5f9'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e");
+	}
+	.dark .bg-grid-slate-900 {
+		background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='%230f172a'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e");
+	}
+	.tech-border {
+		@apply border border-gray-200 dark:border-gray-800 hover:border-primary-400 dark:hover:border-primary-600 transition-colors duration-300;
+	}
+	.tech-card {
+		@apply bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm tech-border shadow-sm hover:shadow-md transition-all duration-300;
+	}
+}

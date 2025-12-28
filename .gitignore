@@ -97,7 +97,18 @@ jspm_packages/
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
 
-# TypeScript cache
+# Remix / Vite
+build/
+.cache/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+wrangler.jsonc
+
+# Custom
+record.md
+../record.md
 *.tsbuildinfo
 
 # Optional npm cache directory

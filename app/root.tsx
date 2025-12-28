@@ -62,7 +62,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 				<Meta />
 				<Links />
 			</head>
-			<body>
+			<body className="bg-gray-50 bg-grid-slate-100 min-h-screen dark:bg-gray-950 dark:bg-grid-slate-900">
 				{children}
 				<ScrollRestoration />
 				<Scripts />
@@ -113,12 +113,12 @@ export default function App() {
 
 	return (
 		<>
-			<header className="sticky top-0 z-50 border-b border-gray-200 bg-white/90 backdrop-blur dark:border-gray-800 dark:bg-gray-900/80">
+			<header className="sticky top-0 z-50 border-b border-gray-200/60 bg-white/80 backdrop-blur-md dark:border-gray-800/60 dark:bg-gray-950/80 border-t-4 border-t-primary-500 shadow-sm transition-all duration-300">
 				<div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
 					<div className="flex items-center gap-4">
 						<Link
 							to="/"
-							className="text-sm font-semibold text-gray-900 hover:underline dark:text-gray-100"
+							className="text-base font-bold text-gray-900 transition-colors hover:text-primary-600 dark:text-gray-100 dark:hover:text-primary-400"
 						>
 							AI传感器编程学习论坛
 						</Link>
@@ -152,22 +152,22 @@ export default function App() {
 										</span>
 									) : null}
 								</Link>
-									<Link
-										to="/me"
-										className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-									>
-										个人中心
-									</Link>
-									{showAdmin ? (
-										<>
-											<Link
-												to="/admin/users"
-												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-											>
-												用户管理
-											</Link>
-											{user.role === "superadmin" || user.role === "topadmin" ? (
-												<>
+								<Link
+									to="/me"
+									className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+								>
+									个人中心
+								</Link>
+								{showAdmin ? (
+									<>
+										<Link
+											to="/admin/users"
+											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+										>
+											用户管理
+										</Link>
+										{user.role === "superadmin" || user.role === "topadmin" ? (
+											<>
 												<Link
 													to="/admin/posts/bulk-delete"
 													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
@@ -182,28 +182,28 @@ export default function App() {
 												</Link>
 												<Link
 													to="/admin/discussion-areas"
-										className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-									>
-											讨论区管理
-										</Link>
-										<Link
-											to="/admin/storage"
-											className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-										>
-											存储容量
-										</Link>
-										{user.role === "topadmin" ? (
-											<Link
-												to="/admin/system-logs"
-												className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-											>
-												系统日志
-											</Link>
-										) : null}
+													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+												>
+													讨论区管理
+												</Link>
+												<Link
+													to="/admin/storage"
+													className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+												>
+													存储容量
+												</Link>
+												{user.role === "topadmin" ? (
+													<Link
+														to="/admin/system-logs"
+														className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+													>
+														系统日志
+													</Link>
+												) : null}
 											</>
-									) : null}
-								</>
-							) : null}
+										) : null}
+									</>
+								) : null}
 								<Link
 									to="/logout"
 									className="rounded bg-gray-800 px-3 py-1 text-white hover:bg-gray-700 dark:bg-gray-200 dark:text-gray-900 dark:hover:bg-gray-300"
@@ -215,13 +215,13 @@ export default function App() {
 							<>
 								<Link
 									to="/login"
-									className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									className="rounded-md border border-gray-200 px-4 py-1.5 text-sm font-medium text-gray-700 transition-all hover:border-primary-400 hover:text-primary-600 hover:shadow-sm dark:border-gray-700 dark:text-gray-200 dark:hover:border-primary-500 dark:hover:text-primary-400"
 								>
 									登录
 								</Link>
 								<Link
 									to="/register"
-									className="rounded border border-gray-300 px-3 py-1 text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									className="rounded-md bg-primary-600 px-4 py-1.5 text-sm font-medium text-white transition-all hover:bg-primary-700 hover:shadow-md hover:shadow-primary-500/20 dark:bg-primary-600 dark:hover:bg-primary-500"
 								>
 									注册
 								</Link>
