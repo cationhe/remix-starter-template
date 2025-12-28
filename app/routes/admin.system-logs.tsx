@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "@remix-run/cloudflare";
 import { json } from "@remix-run/cloudflare";
-import { Link, useFetcher, useLoaderData } from "@remix-run/react";
+import { Link, useFetcher, useLoaderData, useNavigation } from "@remix-run/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { assertNotBanned, requireUser } from "~/lib/auth.server";
 import { getDBFromContext, queryAll } from "~/lib/d1.server";
@@ -22,23 +22,49 @@ type LogRow = {
 type LoaderData = {
 	me: Awaited<ReturnType<typeof requireUser>>;
 	eventTypes: string[];
-	initial: {
+	query: {
+		quick: "today" | "week" | "month" | "custom";
+		from: string;
+		to: string;
+		levels: LogLevel[];
+		userId: string;
+		operator: string;
+		operatorId: string;
+		eventType: string;
+		q: string;
+		qMode: "partial" | "exact";
+		sortDir: "asc" | "desc";
+		page: number;
+		pageSize: number;
+	};
+	result: {
 		items: LogRow[];
-		nextCursor: string | null;
+		total: number;
+		totalPages: number;
+		page: number;
+		pageSize: number;
 	};
 };
 
-type DataResponse = {
-	ok: true;
-	items: LogRow[];
-	nextCursor: string | null;
-};
+type UsersResponse = { ok: true; users: { id: number; displayName: string; emailMasked: string; role: string }[] };
 
 function parseIntOrNull(value: string | null) {
 	if (!value) return null;
 	const n = Number(String(value).trim());
 	if (!Number.isFinite(n)) return null;
 	return Math.trunc(n);
+}
+
+function parseMsOrNull(value: string | null) {
+	if (!value) return null;
+	const s = String(value).trim();
+	if (!s) return null;
+	if (/^\d+$/.test(s)) {
+		const n = Number(s);
+		return Number.isFinite(n) ? Math.trunc(n) : null;
+	}
+	const t = Date.parse(s);
+	return Number.isFinite(t) ? t : null;
 }
 
 function clamp(n: number, min: number, max: number) {
@@ -55,6 +81,33 @@ function normalizeLevelsParam(value: string | null): LogLevel[] {
 		if (v === "INFO" || v === "WARN" || v === "ERROR" || v === "DEBUG") out.push(v);
 	}
 	return Array.from(new Set(out));
+}
+
+function getLevelsFromSearchParams(sp: URLSearchParams): LogLevel[] {
+	const all = sp
+		.getAll("levels")
+		.map((s) => String(s).trim().toUpperCase())
+		.filter(Boolean);
+	if (all.length) return normalizeLevelsParam(all.join(","));
+	return normalizeLevelsParam(sp.get("levels"));
+}
+
+function escapeLike(value: string) {
+	return String(value).replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+function buildChineseLoosePattern(value: string) {
+	const chars = Array.from(value).filter((c) => c.trim().length > 0);
+	if (chars.length <= 1) return null;
+	return `%${chars.map((c) => escapeLike(c)).join("%")}%`;
+}
+
+function normalizeOperatorKeyword(value: string) {
+	return String(value)
+		.trim()
+		.replace(/[\u3000\s]+/g, " ")
+		.replace(/[，。；、]+/g, " ")
+		.slice(0, 80);
 }
 
 function startOfTodayMs(now = Date.now()) {
@@ -195,28 +248,6 @@ function truncateText(value: string, maxLen: number) {
 	return `${s.slice(0, Math.max(0, maxLen - 1))}…`;
 }
 
-function encodeCursor(value: { createdAt: number; id: number } | null) {
-	if (!value) return null;
-	try {
-		return btoa(JSON.stringify(value));
-	} catch {
-		return null;
-	}
-}
-
-function decodeCursor(value: string | null) {
-	if (!value) return null;
-	try {
-		const parsed = JSON.parse(atob(value)) as any;
-		const createdAt = Number(parsed?.createdAt ?? 0);
-		const id = Number(parsed?.id ?? 0);
-		if (!Number.isFinite(createdAt) || !Number.isFinite(id) || createdAt <= 0 || id <= 0) return null;
-		return { createdAt, id };
-	} catch {
-		return null;
-	}
-}
-
 async function getDefaultCache() {
 	const anyCaches = caches as any;
 	if (anyCaches?.default) return anyCaches.default as Cache;
@@ -251,17 +282,16 @@ async function getEventTypesWithCache(context: LoaderFunctionArgs["context"], me
 	return list;
 }
 
-function buildLogQuery(args: {
+function buildLogWhere(args: {
 	fromMs: number;
 	toMs: number;
 	levels: LogLevel[];
 	operatorText: string;
+	operatorId: number | null;
 	userId: number | null;
 	eventType: string;
-	keyword: string;
-	limit: number;
-	sortDir: "asc" | "desc";
-	cursor: { createdAt: number; id: number } | null;
+	q: string;
+	qMode: "partial" | "exact";
 }) {
 	const where: string[] = [];
 	const params: unknown[] = [];
@@ -273,107 +303,143 @@ function buildLogQuery(args: {
 	if (args.userId !== null) {
 		where.push("userId = ?");
 		params.push(args.userId);
+	} else if (args.operatorId !== null) {
+		where.push("userId = ?");
+		params.push(args.operatorId);
 	}
+
 	if (args.eventType) {
 		where.push("eventType = ?");
 		params.push(args.eventType);
 	}
-	if (args.operatorText) {
-		const like = `%${args.operatorText}%`;
-		const operatorIdMaybe = /^\d+$/.test(args.operatorText) ? parseIntOrNull(args.operatorText) : null;
-		if (operatorIdMaybe !== null && operatorIdMaybe >= 0 && args.userId === null) {
-			where.push("(userId = ? OR operatorDisplayName LIKE ? OR operatorEmail LIKE ?)");
+
+	const operatorText = normalizeOperatorKeyword(args.operatorText);
+	if (operatorText && args.operatorId === null && args.userId === null) {
+		const like = `%${escapeLike(operatorText)}%`;
+		const loose = buildChineseLoosePattern(operatorText);
+		const pieces: string[] = [];
+		pieces.push("operatorDisplayName LIKE ? ESCAPE '\\'");
+		params.push(like);
+		if (loose) {
+			pieces.push("operatorDisplayName LIKE ? ESCAPE '\\'");
+			params.push(loose);
+		}
+		const operatorIdMaybe = /^\d+$/.test(operatorText) ? parseIntOrNull(operatorText) : null;
+		if (operatorIdMaybe !== null && operatorIdMaybe >= 0) {
+			pieces.push("userId = ?");
 			params.push(operatorIdMaybe);
-			params.push(like);
-			params.push(like);
-		} else {
-			where.push("(operatorDisplayName LIKE ? OR operatorEmail LIKE ?)");
-			params.push(like);
-			params.push(like);
+		}
+		const roleMap: Record<string, string> = {
+			"超管": "superadmin",
+			"超级管理员": "superadmin",
+			"站长": "topadmin",
+			"管理员": "admin",
+		};
+		for (const [k, v] of Object.entries(roleMap)) {
+			if (operatorText.includes(k)) {
+				pieces.push("userId IN (SELECT id FROM users WHERE role = ?)");
+				params.push(v);
+			}
+		}
+		where.push(`(${pieces.join(" OR ")})`);
+	}
+
+	if (args.q) {
+		const q = String(args.q).trim().slice(0, 120);
+		if (q) {
+			if (args.qMode === "exact") {
+				where.push("descriptionSearch = ?");
+				params.push(q);
+			} else {
+				where.push("descriptionSearch LIKE ? ESCAPE '\\'");
+				params.push(`%${escapeLike(q)}%`);
+			}
 		}
 	}
-	if (args.keyword) {
-		where.push("(eventType LIKE ? OR metadataJson LIKE ?)");
-		const like = `%${args.keyword}%`;
-		params.push(like);
-		params.push(like);
-	}
+
 	if (args.levels.length > 0) {
 		where.push(`level IN (${args.levels.map(() => "?").join(",")})`);
 		params.push(...args.levels);
 	}
 
-	if (args.cursor) {
-		if (args.sortDir === "desc") {
-			where.push("(createdAt < ? OR (createdAt = ? AND id < ?))");
-			params.push(args.cursor.createdAt);
-			params.push(args.cursor.createdAt);
-			params.push(args.cursor.id);
-		} else {
-			where.push("(createdAt > ? OR (createdAt = ? AND id > ?))");
-			params.push(args.cursor.createdAt);
-			params.push(args.cursor.createdAt);
-			params.push(args.cursor.id);
-		}
-	}
-
-	const orderBy = args.sortDir === "asc" ? "createdAt ASC, id ASC" : "createdAt DESC, id DESC";
-
-	const sql = `
-		SELECT id, createdAt, level, userId, operatorDisplayName, operatorEmail, eventType, ip, metadataJson
-		FROM (
-			SELECT
-				l.id as id,
-				l.created_at as createdAt,
-				l.user_id as userId,
-				u.display_name as operatorDisplayName,
-				u.email as operatorEmail,
-				l.event_type as eventType,
-				l.ip as ip,
-				l.metadata_json as metadataJson,
-				CASE
-					WHEN LOWER(l.event_type) LIKE '%debug%' THEN 'DEBUG'
-					WHEN LOWER(l.event_type) LIKE '%_failed' OR LOWER(l.event_type) LIKE '%error%' OR LOWER(l.event_type) LIKE '%exception%' THEN 'ERROR'
-					WHEN LOWER(l.event_type) LIKE '%_denied' OR LOWER(l.event_type) LIKE '%rate_limited%' OR LOWER(l.event_type) LIKE '%locked%' OR LOWER(l.event_type) LIKE '%warning%' THEN 'WARN'
-					ELSE 'INFO'
-				END as level
-			FROM security_audit_logs l
-			LEFT JOIN users u ON u.id = l.user_id
-		)
-		WHERE ${where.join(" AND ")}
-		ORDER BY ${orderBy}
-		LIMIT ?
-	`;
-	params.push(args.limit);
-	return { sql, params };
+	return { whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "", params };
 }
 
-async function queryLogs(args: {
+async function queryLogsPage(args: {
 	context: LoaderFunctionArgs["context"];
 	fromMs: number;
 	toMs: number;
 	levels: LogLevel[];
 	operatorText: string;
+	operatorId: number | null;
 	userId: number | null;
 	eventType: string;
-	keyword: string;
-	limit: number;
+	q: string;
+	qMode: "partial" | "exact";
+	page: number;
+	pageSize: number;
 	sortDir: "asc" | "desc";
-	cursor: { createdAt: number; id: number } | null;
 }) {
 	const db = getDBFromContext(args.context);
-	const { sql, params } = buildLogQuery({
+	const baseSelect = `
+		SELECT
+			l.id as id,
+			l.created_at as createdAt,
+			l.user_id as userId,
+			COALESCE(u.display_name, '') as operatorDisplayName,
+			COALESCE(u.email, '') as operatorEmail,
+			l.event_type as eventType,
+			l.ip as ip,
+			l.metadata_json as metadataJson,
+			CASE
+				WHEN LOWER(l.event_type) LIKE '%debug%' THEN 'DEBUG'
+				WHEN LOWER(l.event_type) LIKE '%_failed' OR LOWER(l.event_type) LIKE '%error%' OR LOWER(l.event_type) LIKE '%exception%' THEN 'ERROR'
+				WHEN LOWER(l.event_type) LIKE '%_denied' OR LOWER(l.event_type) LIKE '%rate_limited%' OR LOWER(l.event_type) LIKE '%locked%' OR LOWER(l.event_type) LIKE '%warning%' THEN 'WARN'
+				ELSE 'INFO'
+			END as level,
+			CASE
+				WHEN l.event_type = 'user_role_updated' THEN '修改用户角色：' || COALESCE(json_extract(l.metadata_json, '$.targetEmail'), '') || ' ' || COALESCE(json_extract(l.metadata_json, '$.prevRole'), '') || ' → ' || COALESCE(json_extract(l.metadata_json, '$.nextRole'), '')
+				WHEN l.event_type = 'discussion_area_updated' THEN '修改讨论区：#' || COALESCE(CAST(json_extract(l.metadata_json, '$.areaId') AS TEXT), '') || ' ' || COALESCE(json_extract(l.metadata_json, '$.name'), '')
+				WHEN l.event_type = 'discussion_area_visibility_updated' THEN '修改讨论区可见性：#' || COALESCE(CAST(json_extract(l.metadata_json, '$.areaId') AS TEXT), '')
+				WHEN l.event_type = 'site_total_storage_limit_updated' THEN '调整网站总存储上限'
+				WHEN l.event_type = 'site_total_storage_limit_update_failed' THEN '调整网站总存储上限失败'
+				WHEN l.event_type = 'posts_banned_bulk_deleted' THEN '批量永久删除封禁帖子'
+				WHEN l.event_type = 'discussion_area_attachment_download_denied' OR l.event_type = 'discussion_area_comment_attachment_download_denied' THEN '附件下载被拒'
+				WHEN l.event_type = 'turnstile_missing_token' OR l.event_type = 'turnstile_verify_failed' THEN 'Turnstile 校验失败'
+				WHEN l.event_type = 'daily_quota_exceeded' THEN '触发每日限额'
+				WHEN l.event_type = 'hidden_post_accessed' THEN '访问隐藏帖'
+				WHEN l.event_type = 'admin_message_sent' THEN '管理员发送消息'
+				WHEN l.event_type = 'comment_attachment_upload_ok' THEN '评论附件上传成功'
+				WHEN l.event_type = 'comment_attachment_upload_failed' THEN '评论附件上传失败'
+				ELSE l.event_type
+			END as descriptionSearch
+		FROM security_audit_logs l
+		LEFT JOIN users u ON u.id = l.user_id
+	`;
+
+	const { whereSql, params } = buildLogWhere({
 		fromMs: args.fromMs,
 		toMs: args.toMs,
 		levels: args.levels,
 		operatorText: args.operatorText,
+		operatorId: args.operatorId,
 		userId: args.userId,
 		eventType: args.eventType,
-		keyword: args.keyword,
-		limit: args.limit,
-		sortDir: args.sortDir,
-		cursor: args.cursor,
+		q: args.q,
+		qMode: args.qMode,
 	});
+
+	const totalRows = await queryAll<{ total: number }>(
+		db,
+		`SELECT COUNT(*) as total FROM (${baseSelect}) ${whereSql}`,
+		params,
+	);
+	const total = Number(totalRows?.[0]?.total ?? 0);
+	const pageSize = args.pageSize;
+	const totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+	const page = clamp(args.page, 1, totalPages);
+	const offset = (page - 1) * pageSize;
+	const orderBy = args.sortDir === "asc" ? "createdAt ASC, id ASC" : "createdAt DESC, id DESC";
 	const rows = await queryAll<{
 		id: number;
 		createdAt: number;
@@ -384,7 +450,11 @@ async function queryLogs(args: {
 		eventType: string;
 		ip: string | null;
 		metadataJson: string | null;
-	}>(db, sql, params);
+	}>(
+		db,
+		`SELECT id, createdAt, level, userId, operatorDisplayName, operatorEmail, eventType, ip, metadataJson FROM (${baseSelect}) ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+		[...params, pageSize, offset],
+	);
 
 	const items: LogRow[] = rows.map((r) => {
 		const eventType = String(r.eventType || "");
@@ -406,37 +476,7 @@ async function queryLogs(args: {
 		};
 	});
 
-	const last = items.length > 0 ? items[items.length - 1] : null;
-	const nextCursor = items.length >= args.limit && last ? encodeCursor({ createdAt: last.createdAt, id: last.id }) : null;
-	return { items, nextCursor };
-}
-
-function buildQueryString(args: {
-	fromMs: number;
-	toMs: number;
-	levels: LogLevel[];
-	operatorText: string;
-	userId: number | null;
-	eventType: string;
-	keyword: string;
-	sortDir: "asc" | "desc";
-	cursor?: string | null;
-	data?: boolean;
-	limit?: number;
-}) {
-	const sp = new URLSearchParams();
-	sp.set("from", String(args.fromMs));
-	sp.set("to", String(args.toMs));
-	if (args.levels.length > 0) sp.set("levels", args.levels.join(","));
-	if (args.operatorText) sp.set("operator", args.operatorText);
-	if (args.userId !== null) sp.set("userId", String(args.userId));
-	if (args.eventType) sp.set("eventType", args.eventType);
-	if (args.keyword) sp.set("q", args.keyword);
-	sp.set("sortDir", args.sortDir);
-	sp.set("limit", String(args.limit ?? 20));
-	if (args.cursor) sp.set("cursor", args.cursor);
-	if (args.data) sp.set("data", "1");
-	return sp.toString();
+	return { items, total, totalPages, page, pageSize };
 }
 
 function escapeCsvCell(value: string) {
@@ -492,12 +532,74 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 	}
 
 	const url = new URL(request.url);
-	const now = Date.now();
-	const quick = String(url.searchParams.get("quick") || "").trim();
-	let fromMs = parseIntOrNull(url.searchParams.get("from"));
-	let toMs = parseIntOrNull(url.searchParams.get("to"));
+	const wantUsers = url.searchParams.get("users") === "1";
+	if (wantUsers) {
+		const operatorText = normalizeOperatorKeyword(url.searchParams.get("operator") || "");
+		if (!operatorText) return json<UsersResponse>({ ok: true, users: [] }, { headers: { "Cache-Control": "no-store" } });
 
-	if (!fromMs || !toMs) {
+		const like = `%${escapeLike(operatorText)}%`;
+		const loose = buildChineseLoosePattern(operatorText);
+		const operatorIdMaybe = /^\d+$/.test(operatorText) ? parseIntOrNull(operatorText) : null;
+		const roleMap: Record<string, string> = {
+			"超管": "superadmin",
+			"超级管理员": "superadmin",
+			"站长": "topadmin",
+			"管理员": "admin",
+		};
+
+		const where: string[] = [];
+		const params: unknown[] = [];
+		where.push("COALESCE(display_name, '') LIKE ? ESCAPE '\\'");
+		params.push(like);
+		if (loose) {
+			where.push("COALESCE(display_name, '') LIKE ? ESCAPE '\\'");
+			params.push(loose);
+		}
+		where.push("COALESCE(email, '') LIKE ? ESCAPE '\\'");
+		params.push(like);
+		if (operatorIdMaybe !== null && operatorIdMaybe >= 0) {
+			where.push("id = ?");
+			params.push(operatorIdMaybe);
+		}
+		for (const [k, v] of Object.entries(roleMap)) {
+			if (operatorText.includes(k)) {
+				where.push("COALESCE(role, '') = ?");
+				params.push(v);
+			}
+		}
+
+		const db = getDBFromContext(context);
+		const users = await queryAll<{ id: number; displayName: string | null; email: string | null; role: string | null }>(
+			db,
+			`SELECT id, COALESCE(display_name, '') as displayName, COALESCE(email, '') as email, COALESCE(role, '') as role FROM users WHERE (${where.join(
+				" OR ",
+			)}) ORDER BY id DESC LIMIT 20`,
+			params,
+		);
+		return json<UsersResponse>(
+			{
+				ok: true,
+				users: users.map((u) => ({
+					id: Number(u.id),
+					displayName: String(u.displayName || "").trim() || `用户#${u.id}`,
+					emailMasked: maskEmail(u.email),
+					role: String(u.role || ""),
+				})),
+			},
+			{ headers: { "Cache-Control": "no-store" } },
+		);
+	}
+
+	const now = Date.now();
+	const quickRaw = String(url.searchParams.get("quick") || "").trim();
+	const quick: LoaderData["query"]["quick"] =
+		quickRaw === "today" || quickRaw === "week" || quickRaw === "month" || quickRaw === "custom" ? quickRaw : "week";
+	const fromTextRaw = String(url.searchParams.get("from") || "").trim();
+	const toTextRaw = String(url.searchParams.get("to") || "").trim();
+	let fromMs = parseMsOrNull(fromTextRaw);
+	let toMs = parseMsOrNull(toTextRaw);
+
+	if (quick !== "custom" || fromMs === null || toMs === null) {
 		if (quick === "today") {
 			fromMs = startOfTodayMs(now);
 			toMs = now;
@@ -509,47 +611,55 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 			toMs = now;
 		}
 	}
-	fromMs = clamp(fromMs, 0, now);
-	toMs = clamp(toMs, 0, now);
+	fromMs = clamp(fromMs ?? startOfWeekMs(now), 0, now);
+	toMs = clamp(toMs ?? now, 0, now);
 	if (fromMs > toMs) {
 		const tmp = fromMs;
 		fromMs = toMs;
 		toMs = tmp;
 	}
 
-	const levels = normalizeLevelsParam(url.searchParams.get("levels"));
+	const levels = (() => {
+		const parsed = getLevelsFromSearchParams(url.searchParams);
+		return parsed.length ? parsed : (["INFO", "WARN", "ERROR"] as LogLevel[]);
+	})();
 	const operatorText = String(url.searchParams.get("operator") || "").trim().slice(0, 80);
+	const operatorIdRaw = parseIntOrNull(url.searchParams.get("operatorId"));
+	const operatorId = operatorIdRaw !== null && operatorIdRaw >= 0 ? operatorIdRaw : null;
 	const userIdRaw = parseIntOrNull(url.searchParams.get("userId"));
 	const userId = userIdRaw !== null && userIdRaw >= 0 ? userIdRaw : null;
 	const eventType = String(url.searchParams.get("eventType") || "").trim().slice(0, 120);
-	const keyword = String(url.searchParams.get("q") || "").trim().slice(0, 120);
-	const sortDir = String(url.searchParams.get("sortDir") || "desc") === "asc" ? "asc" : "desc";
-	const limit = clamp(parseIntOrNull(url.searchParams.get("limit")) ?? 20, 1, 200);
-	const cursor = decodeCursor(url.searchParams.get("cursor"));
-
-	const wantData = url.searchParams.get("data") === "1";
+	const q = String(url.searchParams.get("q") || "").trim().slice(0, 120);
+	const qMode: LoaderData["query"]["qMode"] =
+		String(url.searchParams.get("qMode") || "partial") === "exact" ? "exact" : "partial";
+	const sortDir: LoaderData["query"]["sortDir"] =
+		String(url.searchParams.get("sortDir") || "desc") === "asc" ? "asc" : "desc";
+	const pageSize = 20;
+	const page = clamp(parseIntOrNull(url.searchParams.get("page")) ?? 1, 1, 1000000);
 	const exportMode = String(url.searchParams.get("export") || "").trim();
 
 	const eventTypes = await getEventTypesWithCache(context, me.id);
 
-	const doQuery = async () => {
-		return await queryLogs({
+	const doQuery = async (args?: { page?: number; pageSize?: number }) => {
+		return await queryLogsPage({
 			context,
 			fromMs,
 			toMs,
 			levels,
 			operatorText,
+			operatorId,
 			userId,
 			eventType,
-			keyword,
-			limit,
+			q,
+			qMode,
+			page: args?.page ?? page,
+			pageSize: args?.pageSize ?? pageSize,
 			sortDir,
-			cursor,
 		});
 	};
 
 	if (exportMode === "csv" || exportMode === "excel") {
-		const result = await doQuery();
+		const result = await doQuery({ page: 1, pageSize: 5000 });
 		if (exportMode === "csv") {
 			const body = exportAsCsv(result.items);
 			return new Response(body, {
@@ -570,29 +680,23 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 		});
 	}
 
-	if (wantData) {
-		const cache = await getDefaultCache();
-		const cacheUrl = new URL(request.url);
-		cacheUrl.searchParams.set("uid", String(me.id));
-		const cacheKey = new Request(cacheUrl.toString());
-		const cached = await cache.match(cacheKey);
-		if (cached) {
-			return cached;
-		}
-		const result = await doQuery();
-		const payload: DataResponse = { ok: true, items: result.items, nextCursor: result.nextCursor };
-		const response = json(payload, {
-			headers: {
-				"Cache-Control": "max-age=30",
-				Vary: "Cookie",
-			},
-		});
-		await cache.put(cacheKey, response.clone());
-		return response;
-	}
-
-	const initial = await doQuery();
-	return json<LoaderData>({ me, eventTypes, initial });
+	const result = await doQuery();
+	const query: LoaderData["query"] = {
+		quick,
+		from: quick === "custom" ? fromTextRaw || new Date(fromMs).toISOString().slice(0, 16) : "",
+		to: quick === "custom" ? toTextRaw || new Date(toMs).toISOString().slice(0, 16) : "",
+		levels,
+		userId: userIdRaw !== null ? String(userIdRaw) : "",
+		operator: operatorText,
+		operatorId: operatorIdRaw !== null ? String(operatorIdRaw) : "",
+		eventType,
+		q,
+		qMode,
+		sortDir,
+		page: result.page,
+		pageSize: result.pageSize,
+	};
+	return json<LoaderData>({ me, eventTypes, query, result });
 }
 
 function levelBadgeClass(level: LogLevel) {
@@ -605,91 +709,100 @@ function levelBadgeClass(level: LogLevel) {
 export default function AdminSystemLogsPage() {
 	const data = useLoaderData<LoaderData>();
 	const eventTypes = (data.eventTypes ?? []) as string[];
-	const fetcher = useFetcher<DataResponse>();
-	const [quick, setQuick] = useState<"today" | "week" | "month" | "custom">("week");
-	const [fromText, setFromText] = useState("");
-	const [toText, setToText] = useState("");
-	const [levels, setLevels] = useState<LogLevel[]>(["INFO", "WARN", "ERROR"]);
-	const [userIdText, setUserIdText] = useState("");
-	const [operatorText, setOperatorText] = useState("");
-	const [eventType, setEventType] = useState("");
-	const [keyword, setKeyword] = useState("");
-	const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+	const navigation = useNavigation();
+	const isLoading = navigation.state !== "idle";
 
-	const [items, setItems] = useState<LogRow[]>(() => data.initial.items as any);
-	const [nextCursor, setNextCursor] = useState<string | null>(() => (data.initial.nextCursor as any) ?? null);
-	const loadingMoreRef = useRef(false);
-	const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
+	const usersFetcher = useFetcher<UsersResponse>();
+	const usersDebounceTimerRef = useRef<number | null>(null);
 
-	const limit = 20;
+	const [operatorIdText, setOperatorIdText] = useState(data.query.operatorId || "");
+	const [operatorText, setOperatorText] = useState(data.query.operator || "");
+	const [quick, setQuick] = useState<LoaderData["query"]["quick"]>(data.query.quick);
+	const [fromText, setFromText] = useState(data.query.from || "");
+	const [toText, setToText] = useState(data.query.to || "");
+	const [levels, setLevels] = useState<LogLevel[]>(data.query.levels);
+	const [userIdText, setUserIdText] = useState(data.query.userId || "");
+	const [eventType, setEventType] = useState(data.query.eventType || "");
+	const [q, setQ] = useState(data.query.q || "");
+	const [qMode, setQMode] = useState<LoaderData["query"]["qMode"]>(data.query.qMode);
+	const [sortDir, setSortDir] = useState<LoaderData["query"]["sortDir"]>(data.query.sortDir);
 
 	useEffect(() => {
-		if (fetcher.data?.ok) {
-			setItems(fetcher.data.items as any);
-			setNextCursor(fetcher.data.nextCursor ?? null);
-		}
-	}, [fetcher.data]);
+		setOperatorIdText(data.query.operatorId || "");
+		setOperatorText(data.query.operator || "");
+		setQuick(data.query.quick);
+		setFromText(data.query.from || "");
+		setToText(data.query.to || "");
+		setLevels(data.query.levels);
+		setUserIdText(data.query.userId || "");
+		setEventType(data.query.eventType || "");
+		setQ(data.query.q || "");
+		setQMode(data.query.qMode);
+		setSortDir(data.query.sortDir);
+	}, [
+		data.query.eventType,
+		data.query.from,
+		data.query.levels,
+		data.query.operator,
+		data.query.operatorId,
+		data.query.q,
+		data.query.qMode,
+		data.query.quick,
+		data.query.sortDir,
+		data.query.to,
+		data.query.userId,
+	]);
 
-	const isLoading = fetcher.state !== "idle";
-
-	const resolvedTime = useMemo(() => {
-		const now = Date.now();
-		if (quick === "today") {
-			return { fromMs: startOfTodayMs(now), toMs: now };
+	useEffect(() => {
+		if (usersDebounceTimerRef.current) {
+			window.clearTimeout(usersDebounceTimerRef.current);
+			usersDebounceTimerRef.current = null;
 		}
-		if (quick === "month") {
-			return { fromMs: startOfMonthMs(now), toMs: now };
-		}
-		if (quick === "custom") {
-			const from = fromText ? Date.parse(fromText) : NaN;
-			const to = toText ? Date.parse(toText) : NaN;
-			if (Number.isFinite(from) && Number.isFinite(to)) {
-				return { fromMs: Math.min(from, to), toMs: Math.max(from, to) };
+		const text = operatorText.trim();
+		if (!text) return;
+		if (operatorIdText) return;
+		usersDebounceTimerRef.current = window.setTimeout(() => {
+			usersFetcher.load(`/admin/system-logs?users=1&operator=${encodeURIComponent(text)}`);
+		}, 300);
+		return () => {
+			if (usersDebounceTimerRef.current) {
+				window.clearTimeout(usersDebounceTimerRef.current);
+				usersDebounceTimerRef.current = null;
 			}
-			return { fromMs: startOfWeekMs(now), toMs: now };
-		}
-		return { fromMs: startOfWeekMs(now), toMs: now };
-	}, [quick, fromText, toText]);
+		};
+	}, [operatorText, operatorIdText, usersFetcher]);
 
-	const currentQueryString = useMemo(() => {
-		const userId = (() => {
-			const n = Number(userIdText.trim());
-			return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
-		})();
-		return buildQueryString({
-			fromMs: resolvedTime.fromMs,
-			toMs: resolvedTime.toMs,
-			levels,
-			operatorText,
-			userId,
-			eventType,
-			keyword,
-			sortDir,
-			data: true,
-			limit,
-		});
-	}, [resolvedTime, levels, operatorText, userIdText, eventType, keyword, sortDir]);
+	const baseSearchParams = useMemo(() => {
+		const sp = new URLSearchParams();
+		sp.set("quick", quick);
+		if (quick === "custom") {
+			if (fromText) sp.set("from", fromText);
+			if (toText) sp.set("to", toText);
+		}
+		for (const l of levels) sp.append("levels", l);
+		if (userIdText.trim()) sp.set("userId", userIdText.trim());
+		if (operatorText.trim()) sp.set("operator", operatorText.trim());
+		if (operatorIdText.trim()) sp.set("operatorId", operatorIdText.trim());
+		if (eventType) sp.set("eventType", eventType);
+		if (q.trim()) sp.set("q", q.trim());
+		sp.set("qMode", qMode);
+		sp.set("sortDir", sortDir);
+		return sp;
+	}, [quick, fromText, toText, levels, userIdText, operatorText, operatorIdText, eventType, q, qMode, sortDir]);
 
 	const exportCsvHref = useMemo(() => {
-		const sp = new URLSearchParams(currentQueryString);
-		sp.delete("data");
-		sp.delete("cursor");
+		const sp = new URLSearchParams(baseSearchParams);
+		sp.delete("page");
 		sp.set("export", "csv");
 		return `/admin/system-logs?${sp.toString()}`;
-	}, [currentQueryString]);
+	}, [baseSearchParams]);
 
 	const exportExcelHref = useMemo(() => {
-		const sp = new URLSearchParams(currentQueryString);
-		sp.delete("data");
-		sp.delete("cursor");
+		const sp = new URLSearchParams(baseSearchParams);
+		sp.delete("page");
 		sp.set("export", "excel");
 		return `/admin/system-logs?${sp.toString()}`;
-	}, [currentQueryString]);
-
-	function runQuery() {
-		loadingMoreRef.current = false;
-		fetcher.load(`/admin/system-logs?${currentQueryString}`);
-	}
+	}, [baseSearchParams]);
 
 	function resetFilters() {
 		setQuick("week");
@@ -698,43 +811,43 @@ export default function AdminSystemLogsPage() {
 		setLevels(["INFO", "WARN", "ERROR"]);
 		setUserIdText("");
 		setOperatorText("");
+		setOperatorIdText("");
 		setEventType("");
-		setKeyword("");
+		setQ("");
+		setQMode("partial");
 		setSortDir("desc");
 	}
 
-	async function loadMore() {
-		if (!nextCursor) return;
-		if (isLoading) return;
-		if (loadingMoreRef.current) return;
-		loadingMoreRef.current = true;
-		const sp = new URLSearchParams(currentQueryString);
-		sp.set("cursor", nextCursor);
-		const res = await fetch(`/admin/system-logs?${sp.toString()}`);
-		const payload = (await res.json()) as DataResponse;
-		if (payload.ok) {
-			setItems((prev) => [...prev, ...(payload.items as any)]);
-			setNextCursor(payload.nextCursor ?? null);
-		}
-		loadingMoreRef.current = false;
-	}
+	const items = data.result.items;
+	const page = data.result.page;
+	const totalPages = data.result.totalPages;
+	const total = data.result.total;
 
-	useEffect(() => {
-		const el = loadMoreSentinelRef.current;
-		if (!el) return;
-		const observer = new IntersectionObserver(
-			(entries) => {
-				for (const e of entries) {
-					if (e.isIntersecting) {
-						void loadMore();
-					}
-				}
-			},
-			{ root: null, rootMargin: "600px", threshold: 0.01 },
-		);
-		observer.observe(el);
-		return () => observer.disconnect();
-	}, [currentQueryString, nextCursor, isLoading]);
+	const pagination = useMemo(() => {
+		const out: Array<number | "…"> = [];
+		const add = (v: number | "…") => {
+			if (out[out.length - 1] === v) return;
+			out.push(v);
+		};
+		if (totalPages <= 9) {
+			for (let i = 1; i <= totalPages; i++) add(i);
+			return out;
+		}
+		add(1);
+		if (page > 4) add("…");
+		const start = Math.max(2, page - 2);
+		const end = Math.min(totalPages - 1, page + 2);
+		for (let i = start; i <= end; i++) add(i);
+		if (page < totalPages - 3) add("…");
+		add(totalPages);
+		return out;
+	}, [page, totalPages]);
+
+	function pageHref(nextPage: number) {
+		const sp = new URLSearchParams(baseSearchParams);
+		sp.set("page", String(nextPage));
+		return `/admin/system-logs?${sp.toString()}`;
+	}
 
 	return (
 		<div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-gray-900">
@@ -781,7 +894,12 @@ export default function AdminSystemLogsPage() {
 				<div className="grid gap-4 md:grid-cols-[320px_1fr]">
 					<section className="rounded-xl border border-gray-200 bg-white p-4 shadow dark:border-gray-800 dark:bg-gray-900">
 						<div className="text-sm font-semibold text-gray-900 dark:text-gray-100">查询条件</div>
-						<div className="mt-4 grid gap-4">
+						<form method="get" className="mt-4 grid gap-4">
+							<input type="hidden" name="quick" value={quick} />
+							<input type="hidden" name="qMode" value={qMode} />
+							<input type="hidden" name="sortDir" value={sortDir} />
+							<input type="hidden" name="page" value="1" />
+							{operatorIdText ? <input type="hidden" name="operatorId" value={operatorIdText} /> : null}
 							<div>
 								<div className="text-sm font-medium text-gray-700 dark:text-gray-200">时间范围</div>
 								<div className="mt-2 flex flex-wrap gap-2">
@@ -836,6 +954,7 @@ export default function AdminSystemLogsPage() {
 											<div className="text-xs text-gray-500 dark:text-gray-400">开始时间</div>
 											<input
 												type="datetime-local"
+												name="from"
 												value={fromText}
 												onChange={(e) => setFromText(e.target.value)}
 												className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
@@ -845,6 +964,7 @@ export default function AdminSystemLogsPage() {
 											<div className="text-xs text-gray-500 dark:text-gray-400">结束时间</div>
 											<input
 												type="datetime-local"
+												name="to"
 												value={toText}
 												onChange={(e) => setToText(e.target.value)}
 												className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
@@ -858,6 +978,7 @@ export default function AdminSystemLogsPage() {
 								<div className="text-sm font-medium text-gray-700 dark:text-gray-200">日志级别</div>
 								<select
 									multiple
+									name="levels"
 									value={levels}
 									onChange={(e) => {
 										const selected = Array.from(e.target.selectedOptions)
@@ -881,21 +1002,55 @@ export default function AdminSystemLogsPage() {
 									<input
 										value={userIdText}
 										onChange={(e) => setUserIdText(e.target.value)}
+										name="userId"
 										placeholder="用户ID"
 										className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
 									/>
-									<input
-										value={operatorText}
-										onChange={(e) => setOperatorText(e.target.value)}
-										placeholder="操作人关键字（昵称/邮箱/ID）"
-										className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-									/>
+									<div className="relative">
+										<input
+											value={operatorText}
+											name="operator"
+											onChange={(e) => {
+												setOperatorText(e.target.value);
+												setOperatorIdText("");
+											}}
+											placeholder="操作人关键字（昵称/邮箱/ID）"
+											className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+											autoComplete="off"
+										/>
+										<div className="mt-1 text-xs text-gray-500 dark:text-gray-400">留空则显示全部用户</div>
+										{operatorText.trim() && !operatorIdText && usersFetcher.data?.ok && usersFetcher.data.users.length ? (
+											<div className="absolute z-10 mt-2 w-full overflow-hidden rounded border border-gray-200 bg-white shadow dark:border-gray-800 dark:bg-gray-900">
+												<ul className="max-h-64 overflow-auto py-1 text-sm">
+													{usersFetcher.data.users.map((u) => (
+														<li key={u.id}>
+															<button
+																type="button"
+																onClick={() => {
+																	setOperatorIdText(String(u.id));
+																	setOperatorText(u.displayName);
+																}}
+																className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-800/50"
+														>
+																<span className="text-gray-900 dark:text-gray-100">{u.displayName}</span>
+																<span className="text-xs text-gray-500 dark:text-gray-400">
+																	#{u.id}
+																	{u.emailMasked ? ` · ${u.emailMasked}` : ""}
+																</span>
+															</button>
+														</li>
+													))}
+												</ul>
+											</div>
+										) : null}
+									</div>
 								</div>
 							</div>
 
 							<div>
 								<div className="text-sm font-medium text-gray-700 dark:text-gray-200">操作类型</div>
 								<select
+									name="eventType"
 									value={eventType}
 									onChange={(e) => setEventType(e.target.value)}
 									className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
@@ -911,12 +1066,25 @@ export default function AdminSystemLogsPage() {
 
 							<div>
 								<div className="text-sm font-medium text-gray-700 dark:text-gray-200">关键字搜索</div>
-								<input
-									value={keyword}
-									onChange={(e) => setKeyword(e.target.value)}
-									placeholder="支持模糊匹配（事件类型/元信息）"
-									className="mt-2 w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
-								/>
+								<div className="mt-2 grid gap-2">
+									<div className="flex items-center gap-4 text-sm text-gray-700 dark:text-gray-200">
+										<label className="inline-flex items-center gap-2">
+											<input type="radio" checked={qMode === "partial"} onChange={() => setQMode("partial")} />
+											<span>部分匹配</span>
+										</label>
+										<label className="inline-flex items-center gap-2">
+											<input type="radio" checked={qMode === "exact"} onChange={() => setQMode("exact")} />
+											<span>精确匹配</span>
+										</label>
+									</div>
+									<input
+										name="q"
+										value={q}
+										onChange={(e) => setQ(e.target.value)}
+										placeholder="仅搜索“操作描述”"
+										className="w-full rounded border border-gray-300 px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100"
+									/>
+								</div>
 							</div>
 
 							<div>
@@ -956,21 +1124,20 @@ export default function AdminSystemLogsPage() {
 									重置
 								</button>
 								<button
-									type="button"
-									onClick={runQuery}
+									type="submit"
 									disabled={isLoading}
 									className="rounded bg-blue-600 px-4 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70"
 								>
 									查询
 								</button>
 							</div>
-						</div>
+						</form>
 					</section>
 
 					<section className="rounded-xl border border-gray-200 bg-white shadow dark:border-gray-800 dark:bg-gray-900">
 						<div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-800">
 							<div className="text-sm font-semibold text-gray-900 dark:text-gray-100">日志展示</div>
-							<div className="text-xs text-gray-500 dark:text-gray-400">默认每页 20 条，自动滚动加载</div>
+							<div className="text-xs text-gray-500 dark:text-gray-400">每页固定 20 条 · 共 {totalPages} 页</div>
 						</div>
 						<div className="w-full overflow-auto">
 							<table className="w-full min-w-[900px] table-fixed text-sm">
@@ -1012,22 +1179,52 @@ export default function AdminSystemLogsPage() {
 								</tbody>
 							</table>
 						</div>
-						<div className="flex items-center justify-between border-t border-gray-200 px-4 py-3 dark:border-gray-800">
-							<div className="text-xs text-gray-500 dark:text-gray-400">已展示 {items.length} 条</div>
-							<button
-								type="button"
-								onClick={() => void loadMore()}
-								disabled={!nextCursor || isLoading}
-								className={
-									nextCursor
-										? "rounded border border-gray-300 px-3 py-1 text-sm text-gray-900 hover:bg-gray-50 disabled:opacity-70 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
-										: "pointer-events-none rounded border border-gray-200 px-3 py-1 text-sm text-gray-400 dark:border-gray-800 dark:text-gray-500"
-								}
-							>
-								{nextCursor ? "加载更多" : "没有更多了"}
-							</button>
+						<div className="flex flex-col gap-3 border-t border-gray-200 px-4 py-3 dark:border-gray-800 sm:flex-row sm:items-center sm:justify-between">
+							<div className="text-xs text-gray-500 dark:text-gray-400">
+								第 {page} / {totalPages} 页，共 {total} 条
+							</div>
+							<div className="flex flex-wrap items-center gap-1">
+								<Link
+									to={pageHref(Math.max(1, page - 1))}
+									className={
+										page <= 1
+											? "pointer-events-none rounded border border-gray-200 px-2 py-1 text-sm text-gray-400 dark:border-gray-800 dark:text-gray-500"
+											: "rounded border border-gray-300 px-2 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									}
+								>
+									上一页
+								</Link>
+								{pagination.map((p, idx) =>
+									p === "…" ? (
+										<span key={`ellipsis_${idx}`} className="px-2 py-1 text-sm text-gray-400 dark:text-gray-500">
+											…
+										</span>
+									) : (
+										<Link
+											key={p}
+											to={pageHref(p)}
+											className={
+												p === page
+													? "rounded bg-blue-600 px-2 py-1 text-sm text-white"
+													: "rounded border border-gray-300 px-2 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+											}
+										>
+											{p}
+										</Link>
+									),
+								)}
+								<Link
+									to={pageHref(Math.min(totalPages, page + 1))}
+									className={
+										page >= totalPages
+											? "pointer-events-none rounded border border-gray-200 px-2 py-1 text-sm text-gray-400 dark:border-gray-800 dark:text-gray-500"
+											: "rounded border border-gray-300 px-2 py-1 text-sm text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-100 dark:hover:bg-gray-800"
+									}
+								>
+									下一页
+								</Link>
+							</div>
 						</div>
-						<div ref={loadMoreSentinelRef} />
 					</section>
 				</div>
 			</div>
