@@ -11,7 +11,7 @@ import {
 } from "~/lib/post-images.server";
 
 type ActionData =
-	| { ok: true; imageId: number }
+	| { ok: true; imageId: number; url: string }
 	| {
 			ok: false;
 			error: string;
@@ -73,7 +73,7 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		const bytes = new Uint8Array(await file.arrayBuffer());
 		await putAndScanImageBytes({ context, record, bytes });
 		const row = await finalizeUploadToPostImage({ context, uploadRecordId });
-		return json<ActionData>({ ok: true, imageId: row.id });
+		return json<ActionData>({ ok: true, imageId: row.id, url: `/post-images/${row.id}` });
 	} catch (error) {
 		try {
 			const bucket = getAttachmentsBucket(context);
@@ -93,4 +93,3 @@ export async function action({ request, context, params }: ActionFunctionArgs) {
 		return json<ActionData>({ ok: false, error: "上传失败" }, { status: 500 });
 	}
 }
-
