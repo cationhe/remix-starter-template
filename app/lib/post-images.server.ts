@@ -55,6 +55,22 @@ const DAILY_USER_IMAGE_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024;
 const allowedImageExtensions = new Set(["jpg", "jpeg", "png", "gif", "webp"]);
 const allowedImageMimeTypes = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
+async function logAuditEvent(args: {
+	context: AppLoadContext;
+	userId: number;
+	eventType: string;
+	metadata: Record<string, unknown>;
+}) {
+	try {
+		await execute(
+			getDBFromContext(args.context),
+			"INSERT INTO security_audit_logs (user_id, event_type, ip, user_agent, metadata_json, created_at) VALUES (?, ?, NULL, NULL, ?, ?)",
+			[args.userId, args.eventType, JSON.stringify(args.metadata ?? {}), Date.now()],
+		);
+	} catch {
+	}
+}
+
 function sanitizeFilename(name: string) {
 	const base = String(name || "").trim();
 	const noPath = base.replace(/[/\\]/g, "_");
@@ -217,6 +233,10 @@ export async function createPostImageUploadRecord(args: {
 }) {
 	const now = Date.now();
 	await cleanupExpiredPostImageUploads(args.context, now);
+	try {
+		await processPendingPostImageCleanupJobs(args.context, now, 50);
+	} catch {
+	}
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
 	await assertWithinDailyImageQuota({
 		context: args.context,
@@ -269,6 +289,10 @@ export async function createDraftPostImageUploadRecord(args: {
 }) {
 	const now = Date.now();
 	await cleanupExpiredPostImageUploads(args.context, now);
+	try {
+		await processPendingPostImageCleanupJobs(args.context, now, 50);
+	} catch {
+	}
 	await assertWithinSiteStorageQuota({ context: args.context, extraBytes: args.sizeBytes, now });
 	await assertWithinDailyImageQuota({
 		context: args.context,
@@ -388,6 +412,311 @@ export async function associateDraftImagesToPost(args: {
 	);
 }
 
+function uniquePositiveIntList(values: number[]) {
+	const out: number[] = [];
+	const seen = new Set<number>();
+	for (const v of values) {
+		const n = Number(v);
+		const id = Number.isFinite(n) ? Math.floor(n) : NaN;
+		if (!(id > 0)) continue;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		out.push(id);
+	}
+	return out;
+}
+
+function sleepMs(ms: number) {
+	return new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, Math.floor(ms))));
+}
+
+function computeNextRetryAt(now: number, attempts: number) {
+	const a = Math.max(0, Math.floor(attempts));
+	const base = 5000;
+	const max = 6 * 60 * 60 * 1000;
+	const backoff = Math.min(max, base * Math.pow(2, Math.min(10, a)));
+	const jitter = Math.floor(Math.random() * 1000);
+	return now + backoff + jitter;
+}
+
+async function upsertPostImageCleanupJob(args: {
+	context: AppLoadContext;
+	imageId: number;
+	postId: number;
+	uploaderId: number;
+	draftId: string | null;
+	r2Key: string;
+	filename: string;
+	nextRetryAt: number;
+	lastError: string;
+}) {
+	const db = getDBFromContext(args.context);
+	const now = Date.now();
+	try {
+		await execute(
+			db,
+			"INSERT INTO post_image_cleanup_jobs (image_id, post_id, uploader_id, draft_id, r2_key, filename, attempts, next_retry_at, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?) ON CONFLICT(image_id) DO UPDATE SET post_id = excluded.post_id, uploader_id = excluded.uploader_id, draft_id = excluded.draft_id, r2_key = excluded.r2_key, filename = excluded.filename, next_retry_at = excluded.next_retry_at, last_error = excluded.last_error, updated_at = excluded.updated_at",
+			[
+				args.imageId,
+				args.postId,
+				args.uploaderId,
+				args.draftId,
+				args.r2Key,
+				args.filename,
+				Math.max(0, Math.floor(args.nextRetryAt)),
+				String(args.lastError || "unknown_error"),
+				now,
+				now,
+			],
+		);
+	} catch {
+	}
+}
+
+export type CleanupUnusedDraftPostImagesResult = {
+	associatedCount: number;
+	deletedCount: number;
+	queuedCount: number;
+	failedCount: number;
+	deletedImages: { id: number; filename: string }[];
+	failedImages: { id: number; filename: string; error: string }[];
+};
+
+export async function finalizeDraftPostImagesAfterPublish(args: {
+	context: AppLoadContext;
+	uploaderId: number;
+	draftId: string;
+	postId: number;
+	referencedImageIds: number[];
+}) {
+	const referenced = uniquePositiveIntList(args.referencedImageIds);
+	const usedSet = new Set<number>(referenced);
+	const db = getDBFromContext(args.context);
+	let associatedCount = 0;
+	if (referenced.length > 0) {
+		const placeholders = referenced.map(() => "?").join(",");
+		try {
+			await execute(
+				db,
+				`UPDATE post_images SET post_id = ?, draft_id = NULL WHERE uploader_id = ? AND draft_id = ? AND post_id IS NULL AND id IN (${placeholders})`,
+				[args.postId, args.uploaderId, args.draftId, ...referenced],
+			);
+			const changed = await queryOne<{ n: number | string | null }>(db, "SELECT changes() as n", []);
+			associatedCount = Number(changed?.n ?? 0);
+		} catch {
+			associatedCount = 0;
+		}
+	}
+
+	let unused: { id: number; r2Key: string; filename: string }[] = [];
+	try {
+		if (referenced.length > 0) {
+			const placeholders = referenced.map(() => "?").join(",");
+			unused = await queryAll<{ id: number; r2Key: string; filename: string }>(
+				db,
+				`SELECT id as id, r2_key as r2Key, filename as filename FROM post_images WHERE uploader_id = ? AND draft_id = ? AND post_id IS NULL AND id NOT IN (${placeholders}) ORDER BY id ASC`,
+				[args.uploaderId, args.draftId, ...referenced],
+			);
+		} else {
+			unused = await queryAll<{ id: number; r2Key: string; filename: string }>(
+				db,
+				"SELECT id as id, r2_key as r2Key, filename as filename FROM post_images WHERE uploader_id = ? AND draft_id = ? AND post_id IS NULL ORDER BY id ASC",
+				[args.uploaderId, args.draftId],
+			);
+		}
+	} catch {
+		unused = [];
+	}
+
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(args.context);
+	} catch {
+		bucket = null;
+	}
+
+	const deletedImages: { id: number; filename: string }[] = [];
+	const failedImages: { id: number; filename: string; error: string }[] = [];
+	let queuedCount = 0;
+	for (const img of unused) {
+		if (!img?.id || !(img.id > 0)) continue;
+		if (usedSet.has(img.id)) continue;
+
+		let ok = false;
+		let lastErr = "";
+		if (!bucket) {
+			lastErr = "attachments_bucket_missing";
+			ok = false;
+		} else {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				try {
+					await bucket.delete(img.r2Key);
+					ok = true;
+					break;
+				} catch (error) {
+					lastErr = error instanceof Error ? error.message : "r2_delete_failed";
+					await sleepMs(80 * (attempt + 1));
+				}
+			}
+		}
+
+		if (!ok) {
+			failedImages.push({ id: img.id, filename: img.filename, error: lastErr || "r2_delete_failed" });
+			await upsertPostImageCleanupJob({
+				context: args.context,
+				imageId: img.id,
+				postId: args.postId,
+				uploaderId: args.uploaderId,
+				draftId: args.draftId,
+				r2Key: img.r2Key,
+				filename: img.filename,
+				nextRetryAt: computeNextRetryAt(Date.now(), 0),
+				lastError: lastErr || "r2_delete_failed",
+			});
+			queuedCount++;
+			continue;
+		}
+
+		try {
+			await execute(
+				db,
+				"DELETE FROM post_images WHERE id = ? AND uploader_id = ? AND draft_id = ? AND post_id IS NULL",
+				[img.id, args.uploaderId, args.draftId],
+			);
+			deletedImages.push({ id: img.id, filename: img.filename });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "db_delete_failed";
+			failedImages.push({ id: img.id, filename: img.filename, error: message });
+			await upsertPostImageCleanupJob({
+				context: args.context,
+				imageId: img.id,
+				postId: args.postId,
+				uploaderId: args.uploaderId,
+				draftId: args.draftId,
+				r2Key: img.r2Key,
+				filename: img.filename,
+				nextRetryAt: computeNextRetryAt(Date.now(), 0),
+				lastError: message,
+			});
+			queuedCount++;
+		}
+	}
+
+	await logAuditEvent({
+		context: args.context,
+		userId: args.uploaderId,
+		eventType: "post_image_cleanup_after_publish",
+		metadata: {
+			postId: args.postId,
+			draftId: args.draftId,
+			associatedCount,
+			deletedCount: deletedImages.length,
+			queuedCount,
+			failedCount: failedImages.length,
+			deletedImageIds: deletedImages.map((i) => i.id).slice(0, 50),
+			failedImages: failedImages
+				.map((i) => ({ id: i.id, error: i.error }))
+				.slice(0, 20),
+		},
+	});
+
+	return {
+		associatedCount,
+		deletedCount: deletedImages.length,
+		queuedCount,
+		failedCount: failedImages.length,
+		deletedImages,
+		failedImages,
+	} satisfies CleanupUnusedDraftPostImagesResult;
+}
+
+export async function processPendingPostImageCleanupJobs(context: AppLoadContext, now = Date.now(), limit = 50) {
+	const db = getDBFromContext(context);
+	let bucket: R2Bucket | null = null;
+	try {
+		bucket = getAttachmentsBucket(context);
+	} catch {
+		bucket = null;
+	}
+	let jobs: {
+		imageId: number;
+		postId: number;
+		uploaderId: number;
+		draftId: string | null;
+		r2Key: string;
+		filename: string;
+		attempts: number;
+	}[] = [];
+	try {
+		jobs = await queryAll(
+			db,
+			"SELECT image_id as imageId, post_id as postId, uploader_id as uploaderId, draft_id as draftId, r2_key as r2Key, filename as filename, attempts as attempts FROM post_image_cleanup_jobs WHERE next_retry_at <= ? ORDER BY next_retry_at ASC, updated_at ASC LIMIT ?",
+			[Math.max(0, Math.floor(now)), Math.min(200, Math.max(1, Math.floor(limit)))],
+		);
+	} catch {
+		jobs = [];
+	}
+	if (jobs.length === 0) return { processed: 0, deleted: 0, failed: 0 };
+
+	let deleted = 0;
+	let failed = 0;
+	for (const job of jobs) {
+		let ok = false;
+		let lastErr = "";
+		if (bucket) {
+			try {
+				await bucket.delete(job.r2Key);
+				ok = true;
+			} catch (error) {
+				lastErr = error instanceof Error ? error.message : "r2_delete_failed";
+				ok = false;
+			}
+		} else {
+			lastErr = "attachments_bucket_missing";
+			ok = false;
+		}
+
+		if (ok) {
+			try {
+				await execute(db, "DELETE FROM post_images WHERE id = ?", [job.imageId]);
+			} catch {
+			}
+			try {
+				await execute(db, "DELETE FROM post_image_cleanup_jobs WHERE image_id = ?", [job.imageId]);
+			} catch {
+			}
+			deleted++;
+			continue;
+		}
+
+		failed++;
+		const nextAttempts = Math.max(0, Math.floor(Number(job.attempts ?? 0))) + 1;
+		const nextRetryAt = computeNextRetryAt(Date.now(), nextAttempts);
+		try {
+			await execute(
+				db,
+				"UPDATE post_image_cleanup_jobs SET attempts = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE image_id = ?",
+				[nextAttempts, nextRetryAt, String(lastErr || "r2_delete_failed"), Date.now(), job.imageId],
+			);
+		} catch {
+		}
+	}
+
+	await logAuditEvent({
+		context,
+		userId: 0,
+		eventType: "post_image_cleanup_jobs_processed",
+		metadata: {
+			processed: jobs.length,
+			deleted,
+			failed,
+			imageIds: jobs.map((j) => j.imageId).slice(0, 50),
+		},
+	});
+
+	return { processed: jobs.length, deleted, failed };
+}
+
 export async function listPostImagesForAdmin(context: AppLoadContext, limit = 200) {
 	const db = getDBFromContext(context);
 	const rows = await queryAll<
@@ -425,6 +754,10 @@ export async function deletePostImageById(context: AppLoadContext, imageId: numb
 
 export async function removeAllPostImagesForPost(context: AppLoadContext, postId: number) {
 	const db = getDBFromContext(context);
+	try {
+		await execute(db, "DELETE FROM post_image_cleanup_jobs WHERE post_id = ?", [postId]);
+	} catch {
+	}
 	const images = await queryAll<{ id: number; r2Key: string }>(
 		db,
 		"SELECT id as id, r2_key as r2Key FROM post_images WHERE post_id = ?",

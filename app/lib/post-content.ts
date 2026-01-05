@@ -30,3 +30,17 @@ export function splitPostContentParts(content: string): PostContentPart[] {
 	return parts;
 }
 
+export function extractPostContentImageIds(content: string): number[] {
+	const parts = splitPostContentParts(content);
+	const out: number[] = [];
+	const seen = new Set<number>();
+	for (const p of parts) {
+		if (p.type !== "image") continue;
+		const id = Math.floor(Number(p.imageId));
+		if (!Number.isFinite(id) || id <= 0) continue;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		out.push(id);
+	}
+	return out;
+}

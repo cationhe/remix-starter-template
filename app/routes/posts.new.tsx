@@ -6,8 +6,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { execute, getDBFromContext, queryAll, queryOne } from "~/lib/d1.server";
 import { assertNotBanned, consumeDailyQuota, getClientIp, requireUser } from "~/lib/auth.server";
 import { canPostInDiscussionArea, getEffectiveDiscussionPermissionsForAreas, isDiscussionPermissionsReady } from "~/lib/discussion-permissions.server";
-import { associateDraftImagesToPost } from "~/lib/post-images.server";
-import { splitPostContentParts } from "~/lib/post-content";
+import { finalizeDraftPostImagesAfterPublish } from "~/lib/post-images.server";
+import { extractPostContentImageIds, splitPostContentParts } from "~/lib/post-content";
 
 type AreaListItem = {
 	id: number;
@@ -171,7 +171,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
 		const postId = Number(inserted?.id ?? 0);
 		if (Number.isFinite(postId) && postId > 0 && draftId) {
 			try {
-				await associateDraftImagesToPost({ context, uploaderId: user.id, draftId, postId: Math.floor(postId) });
+				const referencedImageIds = extractPostContentImageIds(trimmedContent);
+				await finalizeDraftPostImagesAfterPublish({
+					context,
+					uploaderId: user.id,
+					draftId,
+					postId: Math.floor(postId),
+					referencedImageIds,
+				});
 			} catch {
 			}
 		}

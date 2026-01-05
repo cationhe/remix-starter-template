@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { splitPostContentParts } from "../../app/lib/post-content";
+import { extractPostContentImageIds, splitPostContentParts } from "../../app/lib/post-content";
 
 test("插图语法：纯文本不应被拆分", () => {
 	const parts = splitPostContentParts("hello\nworld");
@@ -21,4 +21,14 @@ test("插图语法：非法 id 应保留为文本", () => {
 		{ type: "text", text: "[[img:0]]" },
 		{ type: "text", text: "[[img:abc]]" },
 	]);
+});
+
+test("提取插图ID：应返回去重后的正整数列表", () => {
+	const ids = extractPostContentImageIds("a[[img:2]]b[[img:2]][[img:5]]");
+	expect(ids).toEqual([2, 5]);
+});
+
+test("提取插图ID：非法 id 不应被提取", () => {
+	const ids = extractPostContentImageIds("[[img:0]][[img:-1]][[img:abc]]");
+	expect(ids).toEqual([]);
 });
